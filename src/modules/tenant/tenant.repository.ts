@@ -5,35 +5,28 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { BaseRepository } from '../../database/postgres/base.repository.js';
 import { Tenant, TenantSettings } from '../../models/index.js';
 
-/** Thin wrapper around the TypeORM repository. */
+/** Tenant queries; the common ones (findById, save, ...) come from BaseRepository. */
 @Injectable()
-export class TenantRepository {
-  constructor(@InjectRepository(Tenant) private readonly tenants: Repository<Tenant>) {}
-
-  /** Inserts a tenant. Throws a unique violation if the slug exists. */
-  create(input: { name: string; slug: string; settings?: TenantSettings }): Promise<Tenant> {
-    return this.tenants.save(this.tenants.create({ ...input, settings: input.settings ?? {} }));
+export class TenantRepository extends BaseRepository<Tenant> {
+  constructor(@InjectRepository(Tenant) repository: Repository<Tenant>) {
+    super(repository);
   }
 
-  /** Tenant by id, or null. */
-  findById(id: string): Promise<Tenant | null> {
-    return this.tenants.findOneBy({ id });
+  /** Inserts a tenant. Throws a unique violation if the slug exists. */
+  createTenant(input: { name: string; slug: string; settings?: TenantSettings }): Promise<Tenant> {
+    return this.create({ ...input, settings: input.settings ?? {} });
   }
 
   /** Tenant by slug, or null. */
   findBySlug(slug: string): Promise<Tenant | null> {
-    return this.tenants.findOneBy({ slug });
+    return this.findOne({ slug });
   }
 
   /** All tenants, newest first. */
   findAll(): Promise<Tenant[]> {
-    return this.tenants.find({ order: { createdAt: 'DESC' } });
-  }
-
-  /** Persists changes to a loaded tenant. */
-  save(tenant: Tenant): Promise<Tenant> {
-    return this.tenants.save(tenant);
+    return this.findMany({}, { order: { createdAt: 'DESC' } });
   }
 }

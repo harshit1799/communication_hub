@@ -38,7 +38,7 @@ export class TenantService {
   async create(dto: CreateTenantDto, rawKey?: string): Promise<CreatedTenantResponseDto> {
     let tenant: Tenant;
     try {
-      tenant = await this.tenants.create(dto);
+      tenant = await this.tenants.createTenant(dto);
     } catch (err) {
       if ((err as { code?: string }).code === UNIQUE_VIOLATION) {
         throw new AppException(ERROR.TENANT_SLUG_TAKEN);
@@ -97,7 +97,7 @@ export class TenantService {
 
   /** Revokes a key; revoking an already revoked key is a no-op. */
   async revokeApiKey(tenantId: string, keyId: string): Promise<void> {
-    const apiKey = await this.apiKeyRepository.findOne(tenantId, keyId);
+    const apiKey = await this.apiKeyRepository.findForTenant(tenantId, keyId);
     if (!apiKey) throw new AppException(ERROR.API_KEY_NOT_FOUND);
     if (!apiKey.revokedAt) await this.apiKeys.revoke(apiKey);
   }

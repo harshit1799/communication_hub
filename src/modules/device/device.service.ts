@@ -17,7 +17,7 @@ export class DeviceService {
 
   /** Upserts the token for the user and returns the stored device. */
   async register(tenantId: string, dto: RegisterDeviceDto): Promise<DeviceResponseDto> {
-    return this.toDto(await this.devices.upsert({ tenantId, ...dto }));
+    return this.toDto(await this.devices.register({ tenantId, ...dto }));
   }
 
   /** Deletes the token. Throws DEVICE_NOT_FOUND if it doesn't exist. */

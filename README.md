@@ -205,6 +205,22 @@ process applies pending migrations on startup; workers never migrate.
 | `notification_attempts` | Audit log of every delivery attempt |
 | `device_tokens` | Push tokens per tenant user |
 
+**Queries** live in repositories (`src/modules/*/*.repository.ts`), each extending
+`BaseRepository<T>` (`src/database/postgres/base.repository.ts`, the counterpart of the
+backend's `EncryptedAbstractRepository`). The base provides the common queries:
+
+| Group | Methods |
+| --- | --- |
+| Create | `create`, `insert`, `upsert`, `save` |
+| Read | `findById`, `findOne`, `findMany`, `pluck`, `exists`, `count` |
+| Update / delete | `updateWhere` (conditional, returns rows changed), `updateById`, `deleteWhere` |
+| Lists | `paginateByCursor` (keyset pagination on `created_at`, `id`) |
+| SQL | `rawQuery` (parameterized; returns rows for SELECT and `UPDATE … RETURNING` alike), `queryBuilder`, `transaction` |
+
+Repositories add named domain queries on top (`markSent`, `claimStuck`, `findBySlug`, …).
+Services call repositories, never TypeORM directly. Raw SQL is used only where
+TypeORM can't express the query, and is always parameterized.
+
 To change the schema, edit a model in `src/models`, run
 `npm run migration:generate -- src/database/postgres/migrations/<name>`, then add
 the class to `src/database/postgres/migrations/index.ts`.
@@ -235,7 +251,8 @@ src/
   common/dtos/            pagination DTOs
   config/                 typed config, env validation, environment.ts (.env + Secrets Manager)
   constant/               enums, queue names, limits, headers
-  database/postgres/      connection, CLI data source, migrations
+  database/postgres/      connection, CLI data source, migrations,
+                          base.repository.ts (common queries every repository extends)
   decorator/              @ResponseMessage, @CurrentTenant, @Public, @AdminOnly, @ApiEnvelope
   dto/                    request/response DTOs
   exceptions/             AppException + global filter

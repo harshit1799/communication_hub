@@ -7,9 +7,9 @@
 
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Brackets, In, Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import type { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity.js';
-import { Cursor } from '../../common/dtos/common.dtos.js';
+import { BaseRepository, CursorPage } from '../../database/postgres/base.repository.js';
 import { IN_FLIGHT_STATUSES, NotificationStatus } from '../../constant/index.js';
 import { ListNotificationsDto } from '../../dto/index.js';
 import { Notification } from '../../models/index.js';
@@ -22,10 +22,10 @@ export type NewNotification = Omit<
 
 /** Every tenant-facing query is scoped by tenant id. */
 @Injectable()
-export class NotificationRepository {
-  constructor(
-    @InjectRepository(Notification) private readonly notifications: Repository<Notification>,
-  ) {}
+export class NotificationRepository extends BaseRepository<Notification> {
+  constructor(@InjectRepository(Notification) repository: Repository<Notification>) {
+    super(repository);
+  }
 
   /**
    * Inserts the rows in one statement. Rows whose idempotency key already
@@ -36,7 +36,7 @@ export class NotificationRepository {
     tenantId: string,
     rows: NewNotification[],
   ): Promise<{ inserted: Notification[]; duplicates: Notification[] }> {
-    await this.notifications
+    await this.repository
       .createQueryBuilder()
       .insert()
       .into(Notification)
@@ -47,89 +47,61 @@ export class NotificationRepository {
       .updateEntity(false)
       .execute();
 
-    const ids = rows.map((r) => r.id);
-    const inserted = await this.notifications.findBy({ id: In(ids) });
+    const inserted = await this.findMany({ id: In(rows.map((r) => r.id)) });
     const insertedIds = new Set(inserted.map((n) => n.id));
     const duplicateKeys = rows
       .filter((r) => !insertedIds.has(r.id) && r.idempotencyKey)
       .map((r) => r.idempotencyKey!);
     const duplicates = duplicateKeys.length
-      ? await this.notifications.findBy({ tenantId, idempotencyKey: In(duplicateKeys) })
+      ? await this.findMany({ tenantId, idempotencyKey: In(duplicateKeys) })
       : [];
     return { inserted, duplicates };
   }
 
   /** A notification of this tenant, or null. */
   findForTenant(tenantId: string, id: string): Promise<Notification | null> {
-    return this.notifications.findOneBy({ tenantId, id });
+    return this.findOne({ tenantId, id });
   }
 
   /** A notification of this tenant with its attempts in order, or null. */
   findWithAttempts(tenantId: string, id: string): Promise<Notification | null> {
-    return this.notifications.findOne({
-      where: { tenantId, id },
-      relations: { attemptLog: true },
-      order: { attemptLog: { attempt: 'ASC' } },
-    });
+    return this.findOne({ tenantId, id }, { relations: { attemptLog: true }, order: { attemptLog: { attempt: 'ASC' } } });
   }
 
   /** For workers: the notification with its tenant (branding/senders). */
   findWithTenant(id: string): Promise<Notification | null> {
-    return this.notifications.findOne({ where: { id }, relations: { tenant: true } });
+    return this.findOne({ id }, { relations: { tenant: true } });
   }
 
-  /** Newest first, keyset-paginated on (created_at, id). */
-  async list(tenantId: string, query: ListNotificationsDto) {
-    const qb = this.notifications
-      .createQueryBuilder('n')
-      .where('n.tenant_id = :tenantId', { tenantId })
-      .orderBy('n.created_at', 'DESC')
-      .addOrderBy('n.id', 'DESC')
-      .take(query.limit + 1);
-
+  /** The tenant's notifications, newest first, filtered and cursor-paginated. */
+  list(tenantId: string, query: ListNotificationsDto): Promise<CursorPage<Notification>> {
+    const qb = this.queryBuilder('n').where('n.tenant_id = :tenantId', { tenantId });
     if (query.status) qb.andWhere('n.status = :status', { status: query.status });
     if (query.channel) qb.andWhere('n.channel = :channel', { channel: query.channel });
     if (query.recipient) qb.andWhere('n.recipient = :recipient', { recipient: query.recipient });
     if (query.userId) qb.andWhere('n.user_id = :userId', { userId: query.userId });
-    const cursor = query.cursor ? Cursor.decode(query.cursor) : null;
-    if (cursor) {
-      qb.andWhere(
-        new Brackets((w) =>
-          w
-            .where('n.created_at < :createdAt', cursor)
-            .orWhere('(n.created_at = :createdAt AND n.id < :id)', cursor),
-        ),
-      );
-    }
-
-    const rows = await qb.getMany();
-    const hasMore = rows.length > query.limit;
-    const data = hasMore ? rows.slice(0, query.limit) : rows;
-    const last = data.at(-1);
-    return {
-      data,
-      nextCursor: hasMore && last ? Cursor.encode(last.createdAt, last.id) : null,
-    };
+    return this.paginateByCursor(qb, 'n', query.limit, query.cursor);
   }
 
   /**
    * Claims the notification for a delivery attempt. Returns the attempt
    * number, or null when it is no longer deliverable (sent, cancelled, ...).
+   * Raw SQL: needs UPDATE ... RETURNING to claim and count in one step.
    */
   async markProcessing(id: string): Promise<number | null> {
-    const [rows] = (await this.notifications.query(
+    const [row] = await this.rawQuery<{ attempts: number }>(
       `UPDATE notifications
           SET status = $2, attempts = attempts + 1, updated_at = now()
         WHERE id = $1 AND status = ANY($3)
     RETURNING attempts`,
       [id, NotificationStatus.Processing, IN_FLIGHT_STATUSES],
-    )) as [{ attempts: number }[], number];
-    return rows[0]?.attempts ?? null;
+    );
+    return row?.attempts ?? null;
   }
 
   /** processing -> sent, with the vendor's message id. */
   async markSent(id: string, provider: string, providerMessageId: string): Promise<void> {
-    await this.notifications.update(
+    await this.updateWhere(
       { id, status: NotificationStatus.Processing },
       { status: NotificationStatus.Sent, provider, providerMessageId, error: null, sentAt: new Date() },
     );
@@ -142,36 +114,31 @@ export class NotificationRepository {
     provider: string,
     error: string,
   ): Promise<void> {
-    await this.notifications.update(
-      { id, status: NotificationStatus.Processing },
-      { status, provider, error },
-    );
+    await this.updateWhere({ id, status: NotificationStatus.Processing }, { status, provider, error });
   }
 
   /** failed -> queued (manual retry). Returns false if it wasn't failed. */
   async requeueFailed(id: string): Promise<boolean> {
-    const result = await this.notifications.update(
-      { id, status: NotificationStatus.Failed },
-      { status: NotificationStatus.Queued, error: null },
-    );
-    return (result.affected ?? 0) > 0;
+    return (await this.updateWhere({ id, status: NotificationStatus.Failed }, { status: NotificationStatus.Queued, error: null })) > 0;
   }
 
   /** queued | retrying -> cancelled. Returns false if it already moved on. */
   async cancel(id: string): Promise<boolean> {
-    const result = await this.notifications.update(
+    const changed = await this.updateWhere(
       { id, status: In([NotificationStatus.Queued, NotificationStatus.Retrying]) },
       { status: NotificationStatus.Cancelled },
     );
-    return (result.affected ?? 0) > 0;
+    return changed > 0;
   }
 
   /**
    * In-flight notifications that haven't changed for a while and are due.
    * Their `updated_at` is bumped so the next sweep doesn't pick them again.
+   * Raw SQL: FOR UPDATE SKIP LOCKED lets several sweepers run without
+   * claiming the same rows.
    */
   async claimStuck(olderThan: Date, limit: number): Promise<Notification[]> {
-    const rows = (await this.notifications.query(
+    const rows = await this.rawQuery<{ id: string; channel: string; priority: string; scheduled_at: Date | null }>(
       `UPDATE notifications SET updated_at = now()
         WHERE id IN (
           SELECT id FROM notifications
@@ -183,9 +150,9 @@ export class NotificationRepository {
            FOR UPDATE SKIP LOCKED)
     RETURNING id, channel, priority, scheduled_at`,
       [IN_FLIGHT_STATUSES, olderThan, limit],
-    )) as [{ id: string; channel: string; priority: string; scheduled_at: Date | null }[], number];
-    return rows[0].map((r) =>
-      this.notifications.create({
+    );
+    return rows.map((r) =>
+      this.repository.create({
         id: r.id,
         channel: r.channel as Notification['channel'],
         priority: r.priority as Notification['priority'],

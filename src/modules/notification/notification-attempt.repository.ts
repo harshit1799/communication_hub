@@ -5,16 +5,17 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { BaseRepository } from '../../database/postgres/base.repository.js';
 import { NotificationAttempt } from '../../models/index.js';
 
 /** Append-only writes; reads happen through the notification relation. */
 @Injectable()
-export class NotificationAttemptRepository {
-  constructor(
-    @InjectRepository(NotificationAttempt) private readonly attempts: Repository<NotificationAttempt>,
-  ) {}
+export class NotificationAttemptRepository extends BaseRepository<NotificationAttempt> {
+  constructor(@InjectRepository(NotificationAttempt) repository: Repository<NotificationAttempt>) {
+    super(repository);
+  }
 
-  /** Stores one attempt. */
+  /** Stores one attempt (append-only, not read back). */
   async record(input: {
     notificationId: string;
     attempt: number;
@@ -25,7 +26,7 @@ export class NotificationAttemptRepository {
     permanent?: boolean;
     durationMs: number;
   }): Promise<void> {
-    await this.attempts.insert({
+    await this.insert({
       ...input,
       providerMessageId: input.providerMessageId ?? null,
       error: input.error ?? null,

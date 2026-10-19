@@ -46,7 +46,7 @@ export class ApiKeyService {
     // Use a known value (bootstrap) instead of generating one.
     rawKey = generateApiKey(),
   ): Promise<{ apiKey: ApiKey; key: string }> {
-    const apiKey = await this.apiKeys.create({
+    const apiKey = await this.apiKeys.createKey({
       tenantId,
       name,
       prefix: apiKeyPrefix(rawKey),
