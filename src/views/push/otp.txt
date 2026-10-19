@@ -1,0 +1,1 @@
+Your {{appName}} verification code is {{code}}.

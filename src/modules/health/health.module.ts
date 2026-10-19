@@ -1,13 +1,15 @@
 /**
- * Health feature module. Groups the health controller so it can be imported
- * into AppModule.
+ * Health module. Imports NotificationModule for queue access, so the
+ * readiness probe can report queue depth.
  */
 
-// Module: decorator that marks a class as a Nest module.
 import { Module } from '@nestjs/common';
-// The controller exposing GET /api/health.
+import { NotificationModule } from '../notification/notification.module.js';
 import { HealthController } from './health.controller.js';
 
-// Register the controller; this module has no services.
-@Module({ controllers: [HealthController] })
+/** Exposes /api/health and /api/health/ready. */
+@Module({
+  imports: [NotificationModule],
+  controllers: [HealthController],
+})
 export class HealthModule {}

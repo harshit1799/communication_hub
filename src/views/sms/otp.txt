@@ -1,0 +1,1 @@
+{{appName}}: your verification code is {{code}}. It expires in {{#if expiresInMinutes}}{{expiresInMinutes}}{{else}}10{{/if}} minutes. Never share this code.

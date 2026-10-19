@@ -1,21 +1,29 @@
 /**
  * Environment variable validation. Runs once at startup; if any variable is
- * invalid the app refuses to start, which surfaces misconfiguration early.
+ * invalid the app refuses to start, which surfaces misconfiguration early
+ * (e.g. EMAIL_PROVIDER=ses without AWS_REGION) instead of at first send.
  */
 
-// plainToInstance: converts a plain object into an instance of a class.
 import { plainToInstance } from 'class-transformer';
-// Validation decorators and the synchronous validator.
 import {
   IsEnum,
+  IsIn,
   IsInt,
   IsNotEmpty,
   IsOptional,
   IsString,
   Max,
   Min,
+  MinLength,
   validateSync,
 } from 'class-validator';
+import {
+  AppRole,
+  DeployEnv,
+  EmailProviderName,
+  PushProviderName,
+  SmsProviderName,
+} from '../constant/index.js';
 
 /** Allowed values for NODE_ENV. */
 export enum NodeEnv {
@@ -24,80 +32,55 @@ export enum NodeEnv {
   Test = 'test',
 }
 
+/** Allowed values for boolean-like variables. */
+const BOOLEAN = ['true', 'false'];
+
 /**
- * Describes every supported environment variable with its rules and default.
- * Each property name matches the environment variable name.
+ * Describes every validated environment variable with its rules and
+ * default. Each property name matches the environment variable name.
+ * Variables without rules (credentials etc.) pass through unchanged.
  */
 class EnvironmentVariables {
-  // Must be one of the NodeEnv values; defaults to development.
   @IsEnum(NodeEnv)
   NODE_ENV: NodeEnv = NodeEnv.Development;
 
-  // Must be an integer between 0 and 65535 (valid TCP port range).
+  @IsEnum(AppRole)
+  APP_ROLE: AppRole = AppRole.All;
+
+  // Deployment environment; everything except local reads AWS Secrets Manager.
+  @IsEnum(DeployEnv)
+  APP_ENV: DeployEnv = DeployEnv.Local;
+
   @IsInt()
   @Min(0)
   @Max(65535)
   PORT: number = 3000;
 
-  // Global route prefix.
   @IsString()
   API_PREFIX: string = 'api';
 
-  // "*" or a comma-separated list of allowed origins.
   @IsString()
   CORS_ORIGINS: string = '*';
 
-  // "true" to serve Swagger UI, anything else disables it.
-  @IsString()
+  @IsIn(['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent'])
+  LOG_LEVEL: string = 'info';
+
+  @IsIn(BOOLEAN)
   SWAGGER_ENABLED: string = 'true';
 
-  // URL path where Swagger UI is mounted.
   @IsString()
   SWAGGER_PATH: string = 'docs';
 
-  // Service display name (white-label branding).
   @IsString()
   APP_NAME: string = 'Communication Hub';
 
-  // Optional NestJS Observe app key.
+  // Admin routes are disabled when this is not set.
   @IsOptional()
   @IsString()
-  OBSERVE_APP_KEY?: string;
+  @MinLength(32, { message: 'ADMIN_API_KEY must be at least 32 characters' })
+  ADMIN_API_KEY?: string;
 
-  // Optional NestJS Observe app secret.
-  @IsOptional()
-  @IsString()
-  OBSERVE_APP_SECRET?: string;
-
-  // Default sender address for emails.
-  @IsString()
-  MAIL_FROM: string = 'Communication Hub <no-reply@example.com>';
-
-  // SMTP server; leave empty to log emails to the console instead.
-  @IsOptional()
-  @IsString()
-  SMTP_HOST?: string;
-
-  // SMTP port (587 = STARTTLS, 465 = TLS).
-  @IsInt()
-  @Min(1)
-  @Max(65535)
-  SMTP_PORT: number = 587;
-
-  // "true" for port 465 (TLS).
-  @IsString()
-  SMTP_SECURE: string = 'false';
-
-  // Optional SMTP credentials.
-  @IsOptional()
-  @IsString()
-  SMTP_USER?: string;
-
-  @IsOptional()
-  @IsString()
-  SMTP_PASS?: string;
-
-  // PostgreSQL connection.
+  // PostgreSQL.
   @IsString()
   DB_HOST: string = 'localhost';
 
@@ -117,13 +100,124 @@ class EnvironmentVariables {
   @IsString()
   DB_NAME: string = 'communication_hub';
 
-  // "true" to connect over TLS.
-  @IsString()
+  @IsIn(BOOLEAN)
   DB_SSL: string = 'false';
 
-  // "true" to log SQL queries.
+  @IsInt()
+  @Min(1)
+  @Max(200)
+  DB_POOL_SIZE: number = 10;
+
+  // Redis.
   @IsString()
-  DB_LOGGING: string = 'false';
+  REDIS_HOST: string = 'localhost';
+
+  @IsInt()
+  @Min(1)
+  @Max(65535)
+  REDIS_PORT: number = 6379;
+
+  @IsInt()
+  @Min(0)
+  REDIS_DB: number = 0;
+
+  @IsIn(BOOLEAN)
+  REDIS_TLS: string = 'false';
+
+  @IsIn(BOOLEAN)
+  REDIS_CLUSTER: string = 'false';
+
+  // Queue.
+  @IsInt()
+  @Min(1)
+  @Max(20)
+  QUEUE_ATTEMPTS: number = 5;
+
+  @IsInt()
+  @Min(100)
+  QUEUE_BACKOFF_MS: number = 5000;
+
+  // Rate limiting per tenant.
+  @IsInt()
+  @Min(1)
+  THROTTLE_TTL_SECONDS: number = 60;
+
+  @IsInt()
+  @Min(1)
+  THROTTLE_LIMIT: number = 600;
+
+  // Providers.
+  @IsEnum(EmailProviderName)
+  EMAIL_PROVIDER: EmailProviderName = EmailProviderName.Console;
+
+  @IsEnum(SmsProviderName)
+  SMS_PROVIDER: SmsProviderName = SmsProviderName.Console;
+
+  @IsEnum(PushProviderName)
+  PUSH_PROVIDER: PushProviderName = PushProviderName.Console;
+
+  @IsString()
+  MAIL_FROM: string = 'Communication Hub <no-reply@example.com>';
+
+  @IsInt()
+  @Min(1)
+  @Max(65535)
+  SMTP_PORT: number = 587;
+
+  @IsIn(BOOLEAN)
+  SMTP_SECURE: string = 'false';
+}
+
+/**
+ * Variables that must be set for the selected provider. Checked after the
+ * per-variable rules so the error names exactly what is missing.
+ */
+const PROVIDER_REQUIREMENTS: Record<string, Record<string, string[][]>> = {
+  EMAIL_PROVIDER: {
+    [EmailProviderName.Smtp]: [['SMTP_HOST']],
+    [EmailProviderName.Sendgrid]: [['SENDGRID_API_KEY']],
+    [EmailProviderName.Ses]: [['AWS_REGION']],
+  },
+  SMS_PROVIDER: {
+    // Twilio needs credentials plus a sender (number OR messaging service).
+    [SmsProviderName.Twilio]: [
+      ['TWILIO_ACCOUNT_SID'],
+      ['TWILIO_AUTH_TOKEN'],
+      ['TWILIO_FROM', 'TWILIO_MESSAGING_SERVICE_SID'],
+    ],
+    [SmsProviderName.Sns]: [['AWS_REGION']],
+  },
+  PUSH_PROVIDER: {},
+};
+
+/**
+ * Cross-field checks that class-validator can't express: credentials
+ * required by the selected providers, and production-only requirements.
+ * Returns one message per problem.
+ */
+function checkProviderRequirements(env: Record<string, unknown>): string[] {
+  const errors: string[] = [];
+  for (const [selector, providers] of Object.entries(PROVIDER_REQUIREMENTS)) {
+    const selected = env[selector] as string | undefined;
+    for (const anyOf of providers[selected ?? ''] ?? []) {
+      if (!anyOf.some((name) => env[name])) {
+        errors.push(`${anyOf.join(' or ')} must be set when ${selector}=${selected}`);
+      }
+    }
+  }
+  const deployed = env.APP_ENV && env.APP_ENV !== DeployEnv.Local;
+  if ((env.NODE_ENV === NodeEnv.Production || deployed) && !env.ADMIN_API_KEY) {
+    errors.push(`ADMIN_API_KEY must be set (APP_ENV=${String(env.APP_ENV ?? DeployEnv.Local)})`);
+  }
+  // Deployed environments must really deliver: console providers only log.
+  if (deployed) {
+    for (const selector of ['EMAIL_PROVIDER', 'SMS_PROVIDER', 'PUSH_PROVIDER']) {
+      if (!env[selector] || env[selector] === 'console') {
+        errors.push(`${selector} must be a real provider (not console) when APP_ENV=${String(env.APP_ENV)}`);
+      }
+    }
+  }
+  return errors;
 }
 
 /**
@@ -131,21 +225,20 @@ class EnvironmentVariables {
  * returns the validated values or throws.
  */
 export function validateEnv(config: Record<string, unknown>) {
-  // Convert the raw env (all strings) into a class instance, turning
-  // strings like "3000" into numbers where the property type is number.
+  // Turn strings like "3000" into numbers where the property type is number.
   const validated = plainToInstance(EnvironmentVariables, config, {
     enableImplicitConversion: true,
   });
-  // Run all decorator rules; missing properties are validated too.
   const errors = validateSync(validated, { skipMissingProperties: false });
-  // If anything failed, stop startup with a readable error list.
-  if (errors.length > 0) {
-    // One readable line per problem, e.g. "- DB_PASSWORD must be set in .env".
-    const messages = errors.flatMap((e) => Object.values(e.constraints ?? {}));
+  const messages = [
+    ...errors.flatMap((e) => Object.values(e.constraints ?? {})),
+    ...checkProviderRequirements(config),
+  ];
+  if (messages.length > 0) {
     throw new Error(
       `Invalid environment configuration:\n- ${messages.join('\n- ')}`,
     );
   }
-  // Return the validated (and type-converted) values.
-  return validated;
+  // Keep variables that have no rule (SMTP_USER, TWILIO_*, ...) as well.
+  return { ...config, ...validated };
 }

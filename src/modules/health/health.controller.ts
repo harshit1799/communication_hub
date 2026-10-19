@@ -1,68 +1,101 @@
 /**
- * Health check endpoint (GET /api/health). Used by load balancers,
- * Kubernetes probes and uptime monitors to confirm the service is alive.
+ * Health checks for load balancers and Kubernetes probes.
+ *
+ *   GET /api/health        liveness: the process is up (no dependencies, so
+ *                          a database blip doesn't get pods restarted)
+ *   GET /api/health/ready  readiness: Postgres and Redis reachable, plus
+ *                          queue depth for dashboards
  */
 
-// Controller/Get: route decorators; VERSION_NEUTRAL: route has no /v1 segment.
-// ServiceUnavailableException: 503, tells probes the service isn't healthy.
-import {
-  Controller,
-  Get,
-  ServiceUnavailableException,
-  VERSION_NEUTRAL,
-} from '@nestjs/common';
-// Swagger decorators for documenting the response and grouping the route.
-import {
-  ApiOkResponse,
-  ApiProperty,
-  ApiServiceUnavailableResponse,
-  ApiTags,
-} from '@nestjs/swagger';
-// The open database connection.
+import { Controller, Get, HttpStatus, VERSION_NEUTRAL } from '@nestjs/common';
+import { ApiOperation, ApiProperty, ApiTags } from '@nestjs/swagger';
+import { SkipThrottle } from '@nestjs/throttler';
 import { DataSource } from 'typeorm';
+import { ApiEnvelope, ApiErrors, Public, ResponseMessage } from '../../decorator/index.js';
+import { AppException } from '../../exceptions/index.js';
+import { ERROR, SUCCESS } from '../../response/response.js';
+import { RedisService } from '../../utils/redis/redis.service.js';
+import { NotificationQueue } from '../notification/notification.queue.js';
 
-/** Response body for the health check (documented in Swagger). */
-class HealthResponseDto {
-  // Always "ok" when the service can respond.
-  @ApiProperty({ example: 'ok' })
-  status: string;
-
-  // Database reachability.
-  @ApiProperty({ example: 'up' })
-  database: string;
-
-  // How long the Node.js process has been running.
-  @ApiProperty({ example: 12.34, description: 'Process uptime in seconds' })
-  uptime: number;
-
-  // Current server time in ISO-8601 format.
-  @ApiProperty({ example: '2026-01-01T00:00:00.000Z' })
-  timestamp: string;
+/** Body of the liveness probe. */
+class LivenessDto {
+  @ApiProperty({ example: 'ok' }) status: string;
+  @ApiProperty({ example: 12.34, description: 'Process uptime in seconds' }) uptime: number;
 }
 
-// Group under "Health" in Swagger UI.
+/** Job counts of one delivery queue. */
+class QueueDepthDto {
+  @ApiProperty() name: string;
+  @ApiProperty() waiting: number;
+  @ApiProperty() delayed: number;
+  @ApiProperty() active: number;
+  @ApiProperty() failed: number;
+}
+
+/** Body of the readiness probe. */
+class ReadinessDto {
+  @ApiProperty({ example: 'up' }) database: string;
+  @ApiProperty({ example: 'up' }) redis: string;
+  @ApiProperty({ type: [QueueDepthDto] }) queues: QueueDepthDto[];
+}
+
+// Never let a hung dependency hang the probe.
+const withTimeout = <T>(promise: Promise<T>, ms = 2000) =>
+  Promise.race([
+    promise,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), ms).unref()),
+  ]);
+
+/** Public, unthrottled and excluded from request logs. */
 @ApiTags('Health')
-// Route: /api/health (version neutral = not prefixed with /v1).
+@Public()
+@SkipThrottle()
 @Controller({ path: 'health', version: VERSION_NEUTRAL })
 export class HealthController {
-  constructor(private readonly dataSource: DataSource) {}
+  constructor(
+    private readonly dataSource: DataSource,
+    private readonly redis: RedisService,
+    private readonly queue: NotificationQueue,
+  ) {}
 
-  // Handles GET /api/health.
+  /** Liveness: always 200 while the process can serve requests. */
   @Get()
-  @ApiOkResponse({ type: HealthResponseDto })
-  @ApiServiceUnavailableResponse({ description: 'Database is unreachable' })
-  async check(): Promise<HealthResponseDto> {
-    // Cheapest possible round trip to Postgres.
-    try {
-      await this.dataSource.query('SELECT 1');
-    } catch {
-      throw new ServiceUnavailableException('Database is unreachable');
+  @ApiOperation({ summary: 'Liveness probe' })
+  @ApiEnvelope(LivenessDto)
+  @ResponseMessage(SUCCESS.HEALTHY)
+  live(): LivenessDto {
+    return { status: 'ok', uptime: process.uptime() };
+  }
+
+  /**
+   * Readiness: 503 when Postgres or Redis is unreachable, so the load
+   * balancer stops routing to this instance.
+   */
+  @Get('ready')
+  @ApiOperation({ summary: 'Readiness probe (Postgres, Redis, queue depth)' })
+  @ApiEnvelope(ReadinessDto)
+  @ApiErrors(HttpStatus.SERVICE_UNAVAILABLE)
+  @ResponseMessage(SUCCESS.HEALTHY)
+  async ready(): Promise<ReadinessDto> {
+    const [database, redis] = await Promise.all([
+      withTimeout(this.dataSource.query('SELECT 1')).then(() => 'up', () => 'down'),
+      withTimeout(this.redis.ping()).then((ok) => (ok ? 'up' : 'down'), () => 'down'),
+    ]);
+    if (database !== 'up' || redis !== 'up') {
+      throw new AppException(ERROR.SERVICE_UNAVAILABLE, { database, redis });
     }
-    return {
-      status: 'ok',
-      database: 'up',
-      uptime: process.uptime(),
-      timestamp: new Date().toISOString(),
-    };
+    const queues = await Promise.all(
+      this.queue.all().map(async (q) => {
+        const counts = await withTimeout(q.getJobCounts('waiting', 'delayed', 'active', 'failed'));
+        return {
+          name: q.name,
+          waiting: counts.waiting ?? 0,
+          delayed: counts.delayed ?? 0,
+          active: counts.active ?? 0,
+          failed: counts.failed ?? 0,
+        };
+      }),
+    );
+    return { database, redis, queues };
   }
 }

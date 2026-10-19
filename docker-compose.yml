@@ -1,0 +1,66 @@
+# Local stack: Postgres, Redis, and the hub as separate API + worker
+# processes (the production topology). `docker compose up --build`
+# API: http://localhost:3000/api   Swagger: http://localhost:3000/docs
+
+x-hub: &hub
+  build: .
+  env_file: .env
+  depends_on:
+    postgres: { condition: service_healthy }
+    redis: { condition: service_healthy }
+  restart: unless-stopped
+
+services:
+  api:
+    <<: *hub
+    environment:
+      NODE_ENV: development
+      APP_ENV: local
+      APP_ROLE: api
+      DB_HOST: postgres
+      DB_PASSWORD: postgres
+      REDIS_HOST: redis
+    ports: ['3000:3000']
+
+  worker:
+    <<: *hub
+    environment:
+      NODE_ENV: development
+      APP_ENV: local
+      APP_ROLE: worker
+      DB_HOST: postgres
+      DB_PASSWORD: postgres
+      REDIS_HOST: redis
+    # The API runs migrations; workers wait for it.
+    depends_on:
+      api: { condition: service_healthy }
+    # Workers serve no HTTP, so the image's HTTP healthcheck doesn't apply.
+    healthcheck:
+      disable: true
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: communication_hub
+    ports: ['5432:5432']
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    # AOF persistence so queued jobs survive a Redis restart.
+    command: ['redis-server', '--appendonly', 'yes', '--maxmemory-policy', 'noeviction']
+    ports: ['6379:6379']
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      retries: 10
+
+volumes:
+  pgdata:
+  redisdata:
