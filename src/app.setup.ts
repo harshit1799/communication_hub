@@ -73,9 +73,10 @@ export async function configureApp(app: NestFastifyApplication, config: AppConfi
       HEADER.API_KEY,
       HEADER.ADMIN_KEY,
       HEADER.REQUEST_ID,
+      HEADER.IDEMPOTENCY_KEY,
       HEADER.LANGUAGE,
     ],
-    exposedHeaders: [HEADER.REQUEST_ID],
+    exposedHeaders: [HEADER.REQUEST_ID, HEADER.IDEMPOTENT_REPLAYED],
     methods: 'GET,POST,PATCH,DELETE',
   });
   // /api/...

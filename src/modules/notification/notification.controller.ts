@@ -4,9 +4,10 @@
  * its final status is available via GET /v1/notifications/:id.
  */
 
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Query, Req } from '@nestjs/common';
-import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import type { FastifyRequest } from 'fastify';
+import { Body, Controller, Get, Headers, HttpCode, HttpStatus, Param, Post, Query, Req, Res } from '@nestjs/common';
+import { ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
+import type { FastifyReply, FastifyRequest } from 'fastify';
+import { HEADER } from '../../constant/index.js';
 import {
   ApiEnvelope,
   ApiErrors,
@@ -39,20 +40,41 @@ import { NotificationService } from './notification.service.js';
 export class NotificationController {
   constructor(private readonly notificationService: NotificationService) {}
 
-  /** Accepts one notification for delivery (202). */
+  /**
+   * Accepts one notification for delivery (202). With an Idempotency-Key, a
+   * retried request returns the original notification (also 202) with the
+   * `Idempotent-Replayed: true` header, and nothing is sent again.
+   */
   @Post()
   @HttpCode(HttpStatus.ACCEPTED)
   @ApiOperation({ summary: 'Send an email, SMS or push notification' })
+  @ApiHeader({
+    name: 'Idempotency-Key',
+    required: false,
+    description: 'Unique per request (e.g. a UUID). Retrying with the same key never sends twice.',
+  })
   @ApiEnvelope(NotificationResponseDto, { status: HttpStatus.ACCEPTED })
+  @ApiErrors(HttpStatus.UNPROCESSABLE_ENTITY)
   @ResponseMessage(SUCCESS.NOTIFICATION_ACCEPTED)
-  send(@CurrentTenant() tenant: TenantContext, @Body() dto: SendNotificationDto, @Req() req: FastifyRequest) {
-    return this.notificationService.send(tenant.tenantId, dto, req.id);
+  async send(
+    @CurrentTenant() tenant: TenantContext,
+    @Body() dto: SendNotificationDto,
+    @Headers(HEADER.IDEMPOTENCY_KEY) idempotencyKey: string | undefined,
+    @Req() req: FastifyRequest,
+    @Res({ passthrough: true }) reply: FastifyReply,
+  ) {
+    const { notification, replayed } = await this.notificationService.send(tenant.tenantId, dto, req.id, idempotencyKey);
+    if (replayed) reply.header(HEADER.IDEMPOTENT_REPLAYED, 'true');
+    return notification;
   }
 
-  /** Accepts up to 500 notifications in one request (202). */
+  /** Accepts up to 500 notifications in one request (202), low priority by default. */
   @Post('bulk')
   @HttpCode(HttpStatus.ACCEPTED)
-  @ApiOperation({ summary: 'Send up to 500 notifications in one request' })
+  @ApiOperation({
+    summary: 'Send up to 500 notifications in one request',
+    description: 'Defaults to low priority (campaigns), so single sends are delivered first.',
+  })
   @ApiEnvelope(BulkNotificationResponseDto, { status: HttpStatus.ACCEPTED })
   @ResponseMessage(SUCCESS.NOTIFICATIONS_ACCEPTED)
   sendBulk(@CurrentTenant() tenant: TenantContext, @Body() dto: SendBulkNotificationDto, @Req() req: FastifyRequest) {

@@ -135,6 +135,10 @@ export const HEADER = {
   ADMIN_KEY: 'x-admin-key',
   REQUEST_ID: 'x-request-id',
   LANGUAGE: 'language',
+  // Standard name (IETF draft, Stripe); Node lower-cases header names.
+  IDEMPOTENCY_KEY: 'idempotency-key',
+  // Set on responses that returned an earlier result for the same key.
+  IDEMPOTENT_REPLAYED: 'idempotent-replayed',
 };
 
 /** Swagger security scheme names. */
@@ -157,6 +161,8 @@ export const LIMITS = {
   FCM_MULTICAST_MAX: 500,
   // Notifications can be scheduled at most this far ahead.
   SCHEDULE_MAX_DAYS: 30,
+  // Max length of an idempotency key (header or body).
+  IDEMPOTENCY_KEY_MAX: 255,
   // Rows re-enqueued per sweeper run.
   SWEEP_BATCH: 500,
 };

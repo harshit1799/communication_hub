@@ -78,6 +78,14 @@ export const ERROR = {
     type: 'TEMPLATE_RENDER_FAILED',
     status: HttpStatus.BAD_REQUEST,
   },
+  IDEMPOTENCY_KEY_INVALID: {
+    type: 'IDEMPOTENCY_KEY_INVALID',
+    status: HttpStatus.BAD_REQUEST,
+  },
+  IDEMPOTENCY_KEY_MISMATCH: {
+    type: 'IDEMPOTENCY_KEY_MISMATCH',
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+  },
   NOTIFICATION_NOT_RETRYABLE: {
     type: 'NOTIFICATION_NOT_RETRYABLE',
     status: HttpStatus.CONFLICT,

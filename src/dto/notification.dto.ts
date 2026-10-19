@@ -122,7 +122,13 @@ export class SendNotificationDto {
   @IsObject()
   metadata?: Record<string, string>;
 
-  @ApiPropertyOptional({ enum: NotificationPriority, default: NotificationPriority.Normal })
+  @ApiPropertyOptional({
+    enum: NotificationPriority,
+    description:
+      'Delivery order within a channel. Use `high` for time-critical messages (login OTPs, ' +
+      'password resets): they jump ahead of everything queued. Default: `normal` for single ' +
+      'sends, `low` for bulk sends, so campaigns never delay single sends.',
+  })
   @IsOptional()
   @IsEnum(NotificationPriority)
   priority?: NotificationPriority;
@@ -138,7 +144,8 @@ export class SendNotificationDto {
   @ApiPropertyOptional({
     description:
       'Unique per tenant. Repeating a request with the same key returns the original ' +
-      'notification instead of sending twice (safe client retries).',
+      'notification instead of sending twice (safe client retries). For single sends the ' +
+      '`Idempotency-Key` header can be used instead.',
     example: 'signup-welcome-user-42',
   })
   @IsOptional()
@@ -245,6 +252,9 @@ export class NotificationListResponseDto extends CursorPageMetaDto {
 export class BulkNotificationResponseDto {
   @ApiProperty({ description: 'Number of notifications accepted' })
   accepted: number;
+
+  @ApiProperty({ description: 'How many of them were earlier results returned for a repeated idempotencyKey (not sent again)' })
+  replayed: number;
 
   @ApiProperty({ type: [NotificationResponseDto], description: 'In request order' })
   notifications: NotificationResponseDto[];

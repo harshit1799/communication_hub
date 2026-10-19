@@ -96,7 +96,10 @@ export interface QueueConfig {
   attempts: number;
   // Base delay for exponential backoff between attempts.
   backoffMs: number;
-  // Re-enqueue notifications stuck in an in-flight state for this long.
+  // Re-enqueue notifications stuck in an in-flight state for this long. Low
+  // on purpose: a row whose job still exists is never enqueued twice, so the
+  // only cost is a cheap check, and orphans (crash between the DB write and
+  // the queue push) are delivered within ~3 minutes.
   stuckAfterMinutes: number;
   // Per-channel worker tuning.
   workers: Record<'email' | 'sms' | 'push', WorkerConfig>;
@@ -243,7 +246,7 @@ export default (): { app: AppConfig } => {
       queue: {
         attempts: int(env.QUEUE_ATTEMPTS, 5),
         backoffMs: int(env.QUEUE_BACKOFF_MS, 5000),
-        stuckAfterMinutes: int(env.QUEUE_STUCK_AFTER_MINUTES, 10),
+        stuckAfterMinutes: int(env.QUEUE_STUCK_AFTER_MINUTES, 2),
         workers: {
           email: worker('EMAIL', 20),
           sms: worker('SMS', 10),

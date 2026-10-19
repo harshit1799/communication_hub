@@ -20,6 +20,10 @@ export default defineConfig({
     include: ['**/*.e2e-spec.ts'],
     // The app boots once per file; give migrations and Redis time.
     hookTimeout: 30_000,
+    testTimeout: 30_000,
+    // Each file boots the app with live workers on the same Redis/DB;
+    // run files one after another so they don't consume each other's jobs.
+    fileParallelism: false,
     // Always a separate database and Redis namespace, so tests never touch
     // development data, whatever .env says.
     env: {

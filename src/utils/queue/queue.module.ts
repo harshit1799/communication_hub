@@ -8,11 +8,28 @@
 
 import { BullModule } from '@nestjs/bullmq';
 import { Global, Module } from '@nestjs/common';
+import type { DefaultJobOptions } from 'bullmq';
 import { ConfigService } from '@nestjs/config';
-import { AppConfig } from '../../config/configuration.js';
+import { AppConfig, QueueConfig } from '../../config/configuration.js';
 import { CHANNEL_QUEUE, MAINTENANCE_QUEUE } from '../../constant/index.js';
 import { createRedisConnection } from '../redis/redis.connection.js';
 import { QueueConnectionLogger } from './queue-connection.logger.js';
+
+/**
+ * Options every delivery job gets (exported so tests use the real values):
+ * retries with exponential backoff (5s, 10s, 20s, ... by default) plus
+ * jitter, so messages that failed together during a provider outage don't
+ * all retry at the same instant when it recovers.
+ */
+export function buildDefaultJobOptions(queue: QueueConfig): DefaultJobOptions {
+  return {
+    attempts: queue.attempts,
+    // jitter 0.5: each delay is randomised between 50% and 100% of its value.
+    backoff: { type: 'exponential', delay: queue.backoffMs, jitter: 0.5 },
+    removeOnComplete: { age: 3600, count: 10_000 },
+    removeOnFail: { age: 7 * 24 * 3600 },
+  };
+}
 
 /** Registers the three channel queues and the maintenance queue. */
 const queues = BullModule.registerQueue(
@@ -47,13 +64,7 @@ const queues = BullModule.registerQueue(
                 maxRetriesPerRequest: null,
               },
           prefix: redis.cluster ? `{${prefix}}` : prefix,
-          defaultJobOptions: {
-            attempts: queue.attempts,
-            // 5s, 10s, 20s, 40s, ... between attempts.
-            backoff: { type: 'exponential', delay: queue.backoffMs },
-            removeOnComplete: { age: 3600, count: 10_000 },
-            removeOnFail: { age: 7 * 24 * 3600 },
-          },
+          defaultJobOptions: buildDefaultJobOptions(queue),
         };
       },
     }),

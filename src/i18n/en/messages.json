@@ -17,7 +17,6 @@
   "API_KEY_CREATED": "API key created. Store it now, it will not be shown again",
   "API_KEY_LISTING": "API keys fetched successfully",
   "API_KEY_REVOKED": "API key revoked",
-
   "BAD_REQUEST": "Bad request",
   "VALIDATION_ERROR": "Request validation failed",
   "NOT_FOUND": "Resource not found",
@@ -37,5 +36,7 @@
   "DEVICE_NOT_FOUND": "Device not found",
   "TENANT_NOT_FOUND": "Tenant not found",
   "TENANT_SLUG_TAKEN": "A tenant with this slug already exists",
-  "API_KEY_NOT_FOUND": "API key not found"
+  "API_KEY_NOT_FOUND": "API key not found",
+  "IDEMPOTENCY_KEY_INVALID": "Idempotency-Key must be 1-255 characters",
+  "IDEMPOTENCY_KEY_MISMATCH": "Idempotency-Key header and idempotencyKey body field differ; send one, or the same value in both"
 }

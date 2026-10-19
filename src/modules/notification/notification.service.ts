@@ -43,12 +43,21 @@ export class NotificationService {
   ) {}
 
   /**
-   * Accepts one notification. Returns the stored row (status `queued`),
-   * or the original row for a repeated idempotency key.
+   * Accepts one notification. Returns the stored row (status `queued`), or
+   * for a repeated idempotency key the original row with `replayed: true`
+   * (nothing is sent again). The key comes from the Idempotency-Key header
+   * or the body's idempotencyKey; if both are given they must match.
    */
-  async send(tenantId: string, dto: SendNotificationDto, requestId?: string): Promise<NotificationResponseDto> {
-    const [notification] = await this.sendMany(tenantId, [dto], requestId);
-    return notification;
+  async send(
+    tenantId: string,
+    dto: SendNotificationDto,
+    requestId?: string,
+    headerKey?: string,
+  ): Promise<{ notification: NotificationResponseDto; replayed: boolean }> {
+    const idempotencyKey = this.resolveIdempotencyKey(headerKey, dto.idempotencyKey);
+    // Single sends default to normal priority: ahead of bulk (low) campaigns.
+    const [result] = await this.sendMany(tenantId, [{ ...dto, idempotencyKey }], NotificationPriority.Normal, requestId);
+    return result;
   }
 
   /** Accepts many notifications in one insert and one enqueue per channel. */
@@ -57,8 +66,14 @@ export class NotificationService {
     dtos: SendNotificationDto[],
     requestId?: string,
   ): Promise<BulkNotificationResponseDto> {
-    const notifications = await this.sendMany(tenantId, dtos, requestId);
-    return { accepted: notifications.length, notifications };
+    // Bulk sends (campaigns) default to low priority, so single sends such as
+    // login OTPs are delivered first even while a large campaign is queued.
+    const results = await this.sendMany(tenantId, dtos, NotificationPriority.Low, requestId);
+    return {
+      accepted: results.length,
+      replayed: results.filter((r) => r.replayed).length,
+      notifications: results.map((r) => r.notification),
+    };
   }
 
   /** One page of the tenant's notifications. Throws 400 on a bad cursor. */
@@ -95,9 +110,12 @@ export class NotificationService {
     if (!(await this.notifications.requeueFailed(n.id))) {
       throw new AppException(ERROR.NOTIFICATION_NOT_RETRYABLE);
     }
-    await this.queue
-      .ensureEnqueued(n, requestId)
-      .catch((err) => this.logger.error(`Enqueue failed for ${n.id}, sweeper will retry: ${errorMessage(err)}`));
+    // try/await (not .catch): also covers errors thrown synchronously.
+    try {
+      await this.queue.ensureEnqueued(n, requestId);
+    } catch (err) {
+      this.logger.error(`Enqueue failed for ${n.id}, sweeper will retry: ${errorMessage(err)}`);
+    }
     return this.toDto({ ...n, status: NotificationStatus.Queued, error: null });
   }
 
@@ -120,8 +138,9 @@ export class NotificationService {
   private async sendMany(
     tenantId: string,
     dtos: SendNotificationDto[],
+    defaultPriority: NotificationPriority,
     requestId?: string,
-  ): Promise<NotificationResponseDto[]> {
+  ): Promise<{ notification: NotificationResponseDto; replayed: boolean }[]> {
     // Reject bad input before anything is stored.
     dtos.forEach((dto) => this.validate(dto));
 
@@ -137,24 +156,46 @@ export class NotificationService {
       data: dto.data ?? null,
       metadata: dto.metadata ?? null,
       status: NotificationStatus.Queued,
-      priority: dto.priority ?? NotificationPriority.Normal,
+      priority: dto.priority ?? defaultPriority,
       idempotencyKey: dto.idempotencyKey ?? null,
       scheduledAt: dto.scheduledAt ? new Date(dto.scheduledAt) : null,
     }));
 
     const { inserted, duplicates } = await this.notifications.insertIdempotent(tenantId, rows);
+    // The rows are committed: the request succeeds even if the queue push
+    // fails (Redis down, process killed); the sweeper enqueues them later.
+    // try/await (not .catch) also covers errors thrown synchronously.
     if (inserted.length > 0) {
-      await this.queue
-        .enqueue(inserted, requestId)
-        .catch((err) =>
-          this.logger.error(`Enqueue failed for ${inserted.length} notifications, sweeper will retry: ${errorMessage(err)}`),
-        );
+      try {
+        await this.queue.enqueue(inserted, requestId);
+      } catch (err) {
+        this.logger.error(`Enqueue failed for ${inserted.length} notifications, sweeper will retry: ${errorMessage(err)}`);
+      }
     }
 
     // Respond in request order; duplicates resolve to the original rows.
     const byId = new Map(inserted.map((n) => [n.id, n]));
     const byKey = new Map(duplicates.map((n) => [n.idempotencyKey, n]));
-    return rows.map((r) => this.toDto(byId.get(r.id) ?? byKey.get(r.idempotencyKey)!));
+    return rows.map((r) => {
+      const created = byId.get(r.id);
+      return { notification: this.toDto(created ?? byKey.get(r.idempotencyKey)!), replayed: !created };
+    });
+  }
+
+  /**
+   * Picks the idempotency key from the Idempotency-Key header and/or the body.
+   * Both given and different is a client bug: rejected rather than guessed.
+   */
+  private resolveIdempotencyKey(headerKey: string | undefined, bodyKey: string | undefined): string | undefined {
+    if (headerKey === undefined) return bodyKey;
+    const key = headerKey.trim();
+    if (!key || key.length > LIMITS.IDEMPOTENCY_KEY_MAX) {
+      throw new AppException(ERROR.IDEMPOTENCY_KEY_INVALID);
+    }
+    if (bodyKey !== undefined && bodyKey !== key) {
+      throw new AppException(ERROR.IDEMPOTENCY_KEY_MISMATCH);
+    }
+    return key;
   }
 
   /**

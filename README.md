@@ -36,10 +36,11 @@ client ─► API (Fastify) ─► Postgres (notifications row, status=queued)
 
 | Concern | How it's handled |
 | --- | --- |
-| Client retries / double submits | `idempotencyKey` (unique per tenant), so a repeat returns the original row |
-| Vendor hiccups | Retries with exponential backoff (`QUEUE_ATTEMPTS`, `QUEUE_BACKOFF_MS`) |
+| Client retries / double submits | `Idempotency-Key` header (or `idempotencyKey` field), unique per tenant. A repeat, even 10 concurrent ones, returns the original row with `Idempotent-Replayed: true` and sends nothing |
+| Vendor hiccups | Retries with exponential backoff and jitter (`QUEUE_ATTEMPTS`, `QUEUE_BACKOFF_MS`), so retries after an outage don't all hit the vendor at once |
+| Campaign vs. OTP | Priorities per channel queue: `high` jumps everything queued. Bulk sends default to `low` and single sends to `normal`, so a running campaign never delays an OTP |
 | Errors retrying can't fix | Providers raise `PermanentDeliveryError` (invalid number, unsubscribed, dead token, …) and the notification fails immediately, without burning retries |
-| Redis blip between DB insert and enqueue | Sweeper job (every minute, runs once cluster-wide) re-enqueues stuck rows |
+| Crash / Redis blip between DB write and enqueue | The row is committed first and the request still succeeds. The sweeper (every minute, once cluster-wide) enqueues rows idle longer than `QUEUE_STUCK_AFTER_MINUTES` (default 2), so delivery happens within ~3 minutes, never twice |
 | Worker crash mid-job | BullMQ stalled-job recovery; workers claim rows with a conditional update, so redelivery is harmless |
 | Cancel vs. worker race | Status changes are conditional (`WHERE status IN …`) |
 | Dead push tokens | Deactivated automatically when FCM reports them |
@@ -150,12 +151,12 @@ request across services.
 ```bash
 KEY='x-api-key: chk_local_dev_key_change_me'
 
-# Email from a template, safe to retry
-curl -X POST localhost:3000/api/v1/notifications -H 'content-type: application/json' -H "$KEY" -d '{
-  "channel": "email", "recipient": "jane@example.com",
+# Login OTP: high priority, safe to retry (same Idempotency-Key = never sent twice)
+curl -X POST localhost:3000/api/v1/notifications -H 'content-type: application/json' -H "$KEY" \
+  -H 'Idempotency-Key: 6f1c2a9e-otp-login-42' -d '{
+  "channel": "email", "recipient": "jane@example.com", "priority": "high",
   "subject": "Your code is {{code}}", "template": "otp",
-  "data": { "name": "Jane", "code": "123456" },
-  "idempotencyKey": "otp-jane-1"
+  "data": { "name": "Jane", "code": "123456" }
 }'
 
 # SMS, scheduled
@@ -216,7 +217,7 @@ the class to `src/database/postgres/migrations/index.ts`.
 | `npm run build` / `start:prod` | Compile and run (`APP_ROLE` decides the role) |
 | `npm run start:api` / `start:worker` | Run a single role from `dist/` |
 | `npm test` | Unit tests |
-| `npm run test:e2e` | E2E against real Postgres + Redis (`createdb communication_hub_test`) |
+| `npm run test:e2e` | E2E against real Postgres + Redis (`createdb communication_hub_test`), including `delivery-guarantees.e2e-spec.ts` (idempotency, priority, retries, crash recovery) |
 | `npm run migration:show` / `:run` / `:revert` / `:generate` | Migrations |
 | `npm run lint` / `format` | oxlint / prettier |
 
