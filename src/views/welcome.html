@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{subject}}</title>
+  </head>
+  <body style="margin:0;padding:0;background:#f4f5f7;font-family:Arial,Helvetica,sans-serif;color:#1f2937;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="padding:24px 12px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:560px;background:#ffffff;border-radius:8px;">
+            <tr>
+              <td style="padding:20px 32px;border-bottom:1px solid #e5e7eb;font-size:18px;font-weight:bold;">
+                {{appName}}
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:32px;font-size:15px;line-height:1.6;">
+                <h2 style="margin:0 0 16px;">Welcome, {{name}}!</h2>
+                <p>Thanks for joining {{appName}}. Your account is ready to use.</p>
+                {{#if actionUrl}}
+                  <p style="margin:24px 0;">
+                    <a href="{{actionUrl}}" style="background:#2563eb;color:#ffffff;padding:12px 20px;border-radius:6px;text-decoration:none;display:inline-block;">
+                      Get started
+                    </a>
+                  </p>
+                {{/if}}
+                <p>If you have any questions, just reply to this email.</p>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:16px 32px;border-top:1px solid #e5e7eb;font-size:12px;color:#6b7280;">
+                &copy; {{year}} {{appName}}. You received this email because you have an account with us.
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
