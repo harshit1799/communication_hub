@@ -263,7 +263,8 @@ export default (): { app: AppConfig } => {
           port: int(env.SMTP_PORT, 587),
           secure: env.SMTP_SECURE === 'true',
           user: optional(env.SMTP_USER),
-          pass: optional(env.SMTP_PASS),
+          // SMTP_PASSWORD is accepted too (the backend service's name).
+          pass: optional(env.SMTP_PASS) ?? optional(env.SMTP_PASSWORD),
         },
         sendgridApiKey: optional(env.SENDGRID_API_KEY),
       },
