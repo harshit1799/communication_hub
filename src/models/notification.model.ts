@@ -1,6 +1,10 @@
 /**
  * `notifications` table: one row per message a tenant asked us to deliver.
  * It is the source of truth for status; the queue only carries the id.
+ *
+ * `recipient` and `data` (template values: names, OTP codes, ...) are
+ * encrypted at rest; `recipient_hash` is a keyed blind index used to
+ * filter by recipient without decrypting.
  */
 
 import {
@@ -15,12 +19,16 @@ import {
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from 'typeorm';
+import type { Relation } from 'typeorm';
 import {
   NotificationChannel,
   NotificationPriority,
   NotificationStatus,
 } from '../constant/index.js';
+import { ENCRYPTED, encryptedJson, encryptedString } from '../utils/crypto/encrypted.transformer.js';
 import { NotificationAttempt } from './notification-attempt.model.js';
+import { SenderIdentity } from './sender-identity.model.js';
+import { Template } from './template.model.js';
 import { Tenant } from './tenant.model.js';
 
 @Entity('notifications')
@@ -36,6 +44,10 @@ import { Tenant } from './tenant.model.js';
 @Index('idx_notifications_in_flight', ['updatedAt'], {
   where: "status IN ('queued', 'processing', 'retrying')",
 })
+// Filter by recipient (the column itself is encrypted).
+@Index('idx_notifications_tenant_recipient_hash', ['tenantId', 'recipientHash'], {
+  where: 'recipient_hash IS NOT NULL',
+})
 export class Notification {
   @PrimaryGeneratedColumn('uuid', {
     primaryKeyConstraintName: 'pk_notifications',
@@ -50,15 +62,20 @@ export class Notification {
     name: 'tenant_id',
     foreignKeyConstraintName: 'fk_notifications_tenant',
   })
-  tenant?: Tenant;
+  tenant?: Relation<Tenant>;
 
   // Text (not a Postgres enum) so adding a channel needs no migration.
   @Column({ type: 'varchar', length: 20 })
   channel: NotificationChannel;
 
   // Email address, phone number or device token. Null for push-to-user.
-  @Column({ type: 'varchar', length: 500, nullable: true })
+  // Encrypted at rest; plaintext in memory.
+  @Column({ type: 'text', nullable: true, transformer: encryptedString(ENCRYPTED.NOTIFICATION_RECIPIENT) })
   recipient: string | null;
+
+  // HMAC of the normalised recipient, scoped by tenant (FieldCipher.blindIndex).
+  @Column({ name: 'recipient_hash', type: 'char', length: 64, nullable: true })
+  recipientHash: string | null;
 
   // Tenant's own user id; push fans out to all of this user's devices.
   @Column({ name: 'user_id', type: 'varchar', length: 128, nullable: true })
@@ -72,13 +89,37 @@ export class Notification {
   @Column({ type: 'text', nullable: true })
   body: string | null;
 
-  // Template name from src/views/<channel>/.
+  // Template name as requested (kept for display if the template is deleted).
   @Column({ type: 'varchar', length: 100, nullable: true })
   template: string | null;
 
-  // Values for the template placeholders.
-  @Column({ type: 'jsonb', nullable: true })
+  // Template and version resolved at accept time: retries render the same
+  // content even if a new version is activated meanwhile.
+  @Column({ name: 'template_id', type: 'uuid', nullable: true })
+  templateId: string | null;
+
+  @ManyToOne(() => Template, { onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'template_id', foreignKeyConstraintName: 'fk_notifications_template' })
+  templateRef?: Relation<Template>;
+
+  @Column({ name: 'template_version', type: 'int', nullable: true })
+  templateVersion: number | null;
+
+  // Values for the template placeholders. Encrypted JSON.
+  @Column({ type: 'text', nullable: true, transformer: encryptedJson(ENCRYPTED.NOTIFICATION_DATA) })
   data: Record<string, unknown> | null;
+
+  // Sender explicitly requested by the client (null = rules / default).
+  @Column({ name: 'sender_id', type: 'uuid', nullable: true })
+  senderId: string | null;
+
+  // In-app only: also show a visible push (default: silent sync signal).
+  @Column({ name: 'also_push', type: 'boolean', default: false })
+  alsoPush: boolean;
+
+  @ManyToOne(() => SenderIdentity, { onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'sender_id', foreignKeyConstraintName: 'fk_notifications_sender' })
+  sender?: Relation<SenderIdentity>;
 
   // Client references; for push also delivered as the FCM data payload.
   @Column({ type: 'jsonb', nullable: true })
@@ -127,9 +168,10 @@ export class Notification {
   sentAt: Date | null;
 
   @OneToMany(() => NotificationAttempt, (a) => a.notification)
-  attemptLog?: NotificationAttempt[];
+  attemptLog?: Relation<NotificationAttempt[]>;
 
-  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
+  // Millisecond precision, like the JS Dates in pagination cursors.
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz', precision: 3 })
   createdAt: Date;
 
   @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' })

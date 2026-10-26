@@ -1,7 +1,5 @@
 /**
- * Application entry point, same shape as the backend's main.ts: one
- * `server()` function that creates the app, applies the global setup,
- * mounts Swagger and starts listening.
+ * Application entry point.
  *
  * How everything is linked:
  *
@@ -10,27 +8,27 @@
  *       .env, then AWS Secrets Manager (utils/secretManager.ts, fetchSecrets)
  *       when APP_ENV is development | staging | preprod | production,
  *       then validation; the result is ConfigService's `app` config
- *     PostgresModule, RedisModule, QueueModule, providers, ...
+ *     PostgresModule, RedisModule, QueueModule, CryptoModule, ...
  *       connect using ConfigService; each logs when it is ready
  *   server()
- *     create the app -> configureApp (app.setup.ts) -> Swagger -> listen
+ *     api / all: gRPC server on GRPC_PORT (proto/communication_hub/v1/*.proto)
+ *     worker:    queue workers only, no gRPC port
+ *     every role: ops HTTP on OPS_PORT (/health/live, /health/ready, /metrics)
  *
  * APP_ROLE (a container variable, like APP_ENV) decides what runs:
- *   api     HTTP API only (scale on request rate)
- *   worker  queue workers only, no HTTP port (scale on queue depth)
+ *   api     gRPC API only (scale on request rate)
+ *   worker  queue workers only (scale on queue depth)
  *   all     both (default; convenient locally)
  */
 
 import { INestApplicationContext } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
-import { NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Logger } from 'nestjs-pino';
 import { AppModule, ObserveInstrument } from './app.module.js';
-import { configureApp, createFastifyAdapter } from './app.setup.js';
 import { AppConfig, readRole } from './config/configuration.js';
 import { AppRole } from './constant/index.js';
-import { SwaggerConfig } from './swagger/index.js';
+import { buildGrpcOptions } from './grpc/grpc.options.js';
 
 /**
  * Last-resort shutdown deadline. Nest's shutdown hooks normally finish in
@@ -54,14 +52,11 @@ function enableGracefulShutdown(app: INestApplicationContext, logger: Logger) {
   }
 }
 
-/** Starts the process in its role. */
+/** Starts the process in its role: exactly one application instance either way. */
 async function server() {
-  // Worker role: queue workers only, no HTTP server.
+  // Worker role: queue workers (started by WorkerLifecycle) + ops port only.
   if (readRole() === AppRole.Worker) {
-    const worker = await NestFactory.createApplicationContext(AppModule, {
-      bufferLogs: true,
-      instrument: ObserveInstrument,
-    });
+    const worker = await NestFactory.createApplicationContext(AppModule, { bufferLogs: true, instrument: ObserveInstrument });
     const logger = worker.get(Logger);
     worker.useLogger(logger);
     enableGracefulShutdown(worker, logger);
@@ -70,27 +65,24 @@ async function server() {
     return;
   }
 
-  // API (or all-in-one): Fastify app; connections log as they come up.
-  const app = await NestFactory.create<NestFastifyApplication>(AppModule, createFastifyAdapter(), {
+  // API (or all-in-one): the gRPC server. Options come from ConfigService,
+  // i.e. after .env + Secrets Manager + validation.
+  const grpc = await NestFactory.createMicroservice(AppModule, {
+    inject: [ConfigService],
+    useFactory: (configService: ConfigService) => buildGrpcOptions(configService.getOrThrow<AppConfig>('app')),
     bufferLogs: true,
     instrument: ObserveInstrument,
   });
-  const logger = app.get(Logger);
-  app.useLogger(logger);
-  enableGracefulShutdown(app, logger);
-
-  // Final configuration (after .env + Secrets Manager + validation).
-  const config = app.get(ConfigService).getOrThrow<AppConfig>('app');
-
-  // Security headers, CORS, prefix, versioning, validation; Swagger.
-  await configureApp(app, config);
-  if (config.swagger.enabled) SwaggerConfig.setup(app, config);
-
-  // Listen on 0.0.0.0 so the port is reachable inside containers.
-  await app.listen(config.port, '0.0.0.0');
-  const url = `http://localhost:${config.port}`;
-  logger.log(`${config.name} (${config.role}, ${config.deployEnv}) running on ${url}/${config.apiPrefix}`, 'Bootstrap');
-  if (config.swagger.enabled) logger.log(`Swagger UI: ${url}/${config.swagger.path}`, 'Bootstrap');
+  const logger = grpc.get(Logger);
+  grpc.useLogger(logger);
+  enableGracefulShutdown(grpc, logger);
+  const config = grpc.get(ConfigService).getOrThrow<AppConfig>('app');
+  await grpc.listen();
+  logger.log(
+    `${config.name} (${config.role}, ${config.deployEnv}) serving gRPC on :${config.grpc.port}` +
+      (config.grpc.reflection ? ' (reflection on)' : ''),
+    'Bootstrap',
+  );
 }
 
 await server();

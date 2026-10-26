@@ -18,8 +18,8 @@ export class SmtpEmailProvider implements EmailProvider {
   private readonly transporter: Transporter;
   private readonly target: string;
 
-  constructor(config: MailConfig, maxConnections: number) {
-    const { host, port, secure, user, pass } = config.smtp;
+  constructor(smtp: MailConfig['smtp'], maxConnections: number) {
+    const { host, port, secure, user, pass } = smtp;
     this.target = `SMTP ${host}:${port}${secure ? ' (TLS)' : ''}, pool ${maxConnections}`;
     this.transporter = nodemailer.createTransport({
       pool: true,
@@ -47,8 +47,7 @@ export class SmtpEmailProvider implements EmailProvider {
     }
   }
 
-  /** Closes the pooled SMTP connections. */
-  /** Startup log label. */
+  /** Log label (no secrets). */
   describe(): string {
     return this.target;
   }
@@ -58,6 +57,7 @@ export class SmtpEmailProvider implements EmailProvider {
     await this.transporter.verify();
   }
 
+  /** Closes the pooled SMTP connections. */
   close(): Promise<void> {
     this.transporter.close();
     return Promise.resolve();

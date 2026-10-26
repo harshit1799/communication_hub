@@ -20,19 +20,18 @@ export interface AppConfig {
   deployEnv: DeployEnv;
   // Display name of the service (Swagger title, default brand in templates).
   name: string;
-  // Whether this process serves HTTP, runs queue workers, or both.
+  // Whether this process serves gRPC, runs queue workers, or both.
   role: AppRole;
-  port: number;
-  // Global route prefix, e.g. "api" -> /api/...
-  apiPrefix: string;
-  // Allowed CORS origins, or '*' to allow all.
-  corsOrigins: string[] | '*';
-  // Max request body in bytes (bulk sends can be large).
-  bodyLimit: number;
+  grpc: GrpcConfig;
+  // HTTP/JSON gateway + Swagger UI in front of the gRPC API (api / all roles).
+  http: HttpGatewayConfig;
+  // Plain HTTP port for /health/live, /health/ready and /metrics (every role).
+  opsPort: number;
   // Log level for pino (trace | debug | info | warn | error | fatal).
   logLevel: string;
-  swagger: SwaggerConfig;
   observe: { appKey: string; appSecret: string };
+  crypto: CryptoConfig;
+  cache: CacheConfig;
   auth: AuthConfig;
   throttle: { ttlSeconds: number; limit: number };
   database: DatabaseConfig;
@@ -45,13 +44,51 @@ export interface AppConfig {
   bootstrap: BootstrapConfig;
 }
 
-/** Swagger UI settings. */
-export interface SwaggerConfig {
-  enabled: boolean;
-  path: string;
-  // When both are set, the docs are protected with HTTP basic auth.
-  user?: string;
-  pass?: string;
+/** gRPC server settings (api / all roles). */
+export interface GrpcConfig {
+  port: number;
+  // Max message size in bytes, both directions (bulk sends can be large).
+  maxMessageBytes: number;
+  // Server reflection, for grpcurl / Postman without the .proto files.
+  reflection: boolean;
+}
+
+/** HTTP/JSON gateway (src/gateway) and its Swagger UI. */
+export interface HttpGatewayConfig {
+  // 0 disables the gateway (gRPC only).
+  port: number;
+  maxBodyBytes: number;
+  swagger: {
+    enabled: boolean;
+    path: string;
+    // When both are set, the docs are protected with HTTP basic auth.
+    user?: string;
+    pass?: string;
+  };
+}
+
+/**
+ * Application-level encryption (see utils/crypto/field-cipher.ts). Raw
+ * strings; parsed and validated by parseCipherKeys at startup.
+ */
+export interface CryptoConfig {
+  // "k1:<base64 32 bytes>,k2:<...>": every key that may still be in the data.
+  keys?: string;
+  // Key id new values are encrypted with (default: the last one listed).
+  activeKeyId?: string;
+  // HMAC key for blind indexes (base64, >= 32 bytes). Never rotate casually:
+  // changing it makes existing recipient lookups miss until re-indexed.
+  blindIndexKey?: string;
+}
+
+/** Redis cache TTLs for configuration read on the send path. */
+export interface CacheConfig {
+  // Provider configs per tenant + channel.
+  providerTtlSeconds: number;
+  // Sender identities and rules per tenant + channel.
+  senderTtlSeconds: number;
+  // Active template version per tenant + channel + name.
+  templateTtlSeconds: number;
 }
 
 /** Authentication settings for tenant and admin routes. */
@@ -102,7 +139,9 @@ export interface QueueConfig {
   // the queue push) are delivered within ~3 minutes.
   stuckAfterMinutes: number;
   // Per-channel worker tuning.
-  workers: Record<'email' | 'sms' | 'push', WorkerConfig>;
+  workers: Record<'email' | 'sms' | 'push' | 'in_app', WorkerConfig>;
+  // In-app inbox messages are kept this long, then purged.
+  inboxRetentionDays: number;
 }
 
 /** Tuning for one channel worker (EMAIL_*, SMS_*, PUSH_*). */
@@ -114,10 +153,13 @@ export interface WorkerConfig {
   rateDurationMs: number;
 }
 
-/** Email delivery settings. */
+/**
+ * Platform default email provider (EMAIL_PROVIDER, SMTP_*, ...): used for
+ * tenants without their own provider configs (provider_configs table).
+ */
 export interface MailConfig {
   provider: EmailProviderName;
-  // Default "From" address, e.g. "Acme <no-reply@acme.com>".
+  // "From" when neither the request, a sender rule nor a tenant default sets one.
   from: string;
   smtp: {
     host?: string;
@@ -130,7 +172,7 @@ export interface MailConfig {
   sendgridApiKey?: string;
 }
 
-/** SMS delivery settings. Only the selected provider needs its values. */
+/** Platform default SMS provider (see MailConfig). Only the selected provider needs its values. */
 export interface SmsConfig {
   provider: SmsProviderName;
   twilio: {
@@ -144,7 +186,7 @@ export interface SmsConfig {
   snsSenderId?: string;
 }
 
-/** Push delivery settings. */
+/** Platform default push provider (see MailConfig). */
 export interface PushConfig {
   provider: PushProviderName;
   // Service account JSON (raw or base64). Empty = Application Default Credentials.
@@ -187,7 +229,7 @@ export const readRole = (): AppRole =>
  */
 export default (): { app: AppConfig } => {
   const env = process.env;
-  const origins = env.CORS_ORIGINS ?? '*';
+  const deployEnv = (env.APP_ENV as DeployEnv) || DeployEnv.Local;
   const worker = (channel: string, concurrency: number): WorkerConfig => ({
     concurrency: int(env[`${channel}_WORKER_CONCURRENCY`], concurrency),
     rateMax: int(env[`${channel}_RATE_MAX`], 100),
@@ -197,24 +239,41 @@ export default (): { app: AppConfig } => {
   return {
     app: {
       env: env.NODE_ENV ?? 'development',
-      deployEnv: (env.APP_ENV as DeployEnv) || DeployEnv.Local,
+      deployEnv,
       name: env.APP_NAME ?? 'Communication Hub',
       role: readRole(),
-      port: int(env.PORT, 3000),
-      apiPrefix: env.API_PREFIX ?? 'api',
-      corsOrigins:
-        origins === '*' ? '*' : origins.split(',').map((o) => o.trim()),
-      bodyLimit: int(env.BODY_LIMIT_BYTES, 5 * 1024 * 1024),
-      logLevel: env.LOG_LEVEL ?? 'info',
-      swagger: {
-        enabled: (env.SWAGGER_ENABLED ?? 'true') === 'true',
-        path: env.SWAGGER_PATH ?? 'docs',
-        user: optional(env.SWAGGER_USER),
-        pass: optional(env.SWAGGER_PASS),
+      grpc: {
+        port: int(env.GRPC_PORT, 50051),
+        maxMessageBytes: int(env.GRPC_MAX_MESSAGE_BYTES, 8 * 1024 * 1024),
+        // Off by default outside local: it publishes the full API surface.
+        reflection: (env.GRPC_REFLECTION ?? (deployEnv === DeployEnv.Local ? 'true' : 'false')) === 'true',
       },
+      http: {
+        port: int(env.HTTP_PORT, 3000),
+        maxBodyBytes: int(env.BODY_LIMIT_BYTES, 5 * 1024 * 1024),
+        swagger: {
+          // Off by default outside local, like reflection.
+          enabled: (env.SWAGGER_ENABLED ?? (deployEnv === DeployEnv.Local ? 'true' : 'false')) === 'true',
+          path: `/${(env.SWAGGER_PATH ?? 'docs').replace(/^\/+|\/+$/g, '')}`,
+          user: optional(env.SWAGGER_USER),
+          pass: optional(env.SWAGGER_PASS),
+        },
+      },
+      opsPort: int(env.OPS_PORT, 9464),
+      logLevel: env.LOG_LEVEL ?? 'info',
       observe: {
         appKey: env.OBSERVE_APP_KEY || 'YOUR_APP_KEY',
         appSecret: env.OBSERVE_APP_SECRET || 'YOUR_APP_SECRET',
+      },
+      crypto: {
+        keys: optional(env.ENCRYPTION_KEYS),
+        activeKeyId: optional(env.ENCRYPTION_ACTIVE_KEY),
+        blindIndexKey: optional(env.BLIND_INDEX_KEY),
+      },
+      cache: {
+        providerTtlSeconds: int(env.PROVIDER_CACHE_TTL_SECONDS, 300),
+        senderTtlSeconds: int(env.SENDER_CACHE_TTL_SECONDS, 300),
+        templateTtlSeconds: int(env.TEMPLATE_CACHE_TTL_SECONDS, 300),
       },
       auth: {
         adminApiKey: optional(env.ADMIN_API_KEY),
@@ -251,7 +310,10 @@ export default (): { app: AppConfig } => {
           email: worker('EMAIL', 20),
           sms: worker('SMS', 10),
           push: worker('PUSH', 20),
+          // Inbox writes are cheap (Postgres + a silent FCM signal).
+          in_app: worker('IN_APP', 20),
         },
+        inboxRetentionDays: int(env.INBOX_RETENTION_DAYS, 90),
       },
       mail: {
         provider:

@@ -12,5 +12,10 @@ export default defineConfig({
     root: './',
     // Unit tests are files ending in .spec.ts.
     include: ['**/*.spec.ts'],
+    // Test-only encryption keys (the config loader requires them).
+    env: {
+      ENCRYPTION_KEYS: 'unit:dW5pdC10ZXN0LWVuY3J5cHRpb24ta2V5LTMyYnl0ZSE=',
+      BLIND_INDEX_KEY: 'dW5pdC10ZXN0LWJsaW5kLWluZGV4LWtleS0zMmJ5dGVzIQ==',
+    },
   },
 });

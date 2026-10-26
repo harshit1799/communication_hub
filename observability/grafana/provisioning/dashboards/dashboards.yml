@@ -1,0 +1,9 @@
+apiVersion: 1
+
+providers:
+  - name: communication-hub
+    folder: Communication Hub
+    type: file
+    disableDeletion: true
+    options:
+      path: /var/lib/grafana/dashboards

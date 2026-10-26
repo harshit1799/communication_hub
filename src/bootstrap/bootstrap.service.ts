@@ -20,6 +20,8 @@ import { errorMessage } from '../utils/appUtils.js';
 
 // How often the stuck-notification sweeper runs.
 const SWEEP_EVERY_MS = 60_000;
+// How often expired inbox messages are purged.
+const PURGE_INBOX_EVERY_MS = 60 * 60_000;
 
 /** Runs once per process after all modules are initialised. */
 @Injectable()
@@ -56,6 +58,11 @@ export class BootstrapService implements OnApplicationBootstrap {
       MAINTENANCE_JOB.REQUEUE_STUCK,
       { every: SWEEP_EVERY_MS },
       { name: MAINTENANCE_JOB.REQUEUE_STUCK, opts: { removeOnComplete: true, removeOnFail: 100 } },
+    );
+    await this.maintenance.upsertJobScheduler(
+      MAINTENANCE_JOB.PURGE_INBOX,
+      { every: PURGE_INBOX_EVERY_MS },
+      { name: MAINTENANCE_JOB.PURGE_INBOX, opts: { removeOnComplete: true, removeOnFail: 100 } },
     );
   }
 

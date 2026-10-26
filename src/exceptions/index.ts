@@ -1,4 +1,3 @@
-/** Re-exports the AppException class and the global exception filter. */
+/** Re-exports the AppException class. (The gRPC filter lives in src/grpc.) */
 
 export * from './app.exception.js';
-export * from './http-exception.filter.js';

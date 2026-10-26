@@ -20,6 +20,7 @@ export class NotificationAttemptRepository extends BaseRepository<NotificationAt
     notificationId: string;
     attempt: number;
     provider: string;
+    sender?: string | null;
     success: boolean;
     providerMessageId?: string | null;
     error?: string | null;
@@ -28,6 +29,7 @@ export class NotificationAttemptRepository extends BaseRepository<NotificationAt
   }): Promise<void> {
     await this.insert({
       ...input,
+      sender: input.sender ?? null,
       providerMessageId: input.providerMessageId ?? null,
       error: input.error ?? null,
       permanent: input.permanent ?? false,

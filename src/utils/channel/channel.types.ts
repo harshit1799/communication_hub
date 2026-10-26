@@ -1,6 +1,7 @@
 /**
  * Contracts shared by every delivery provider (SMTP, SES, SendGrid, Twilio,
- * SNS, FCM, console). Each channel service picks one provider at startup.
+ * SNS, FCM, console). Instances are created per provider config (tenant or
+ * platform default) by the ProviderRegistry, see modules/provider.
  */
 
 /** A fully rendered email. */
@@ -27,6 +28,9 @@ export interface PushMessage {
   body: string;
   // Custom key/value payload delivered to the app (FCM data, strings only).
   data?: Record<string, string>;
+  // Data-only message: nothing is displayed, the app handles it (in-app
+  // inbox sync). title/body are ignored.
+  silent?: boolean;
 }
 
 /** What a provider returns after the vendor accepted the message. */
@@ -72,6 +76,9 @@ export interface PushProvider {
   // Optional real connectivity check, run in the background at startup.
   verify?(): Promise<void>;
 }
+
+/** Any channel's provider. */
+export type ChannelProvider = EmailProvider | SmsProvider | PushProvider;
 
 /**
  * Thrown by providers when retrying can't help (invalid address, number

@@ -11,19 +11,19 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 
-/** Per-tenant branding and sender overrides. All optional. */
+/**
+ * Per-tenant branding. Senders live in `sender_identities` and providers in
+ * `provider_configs` (the former emailFrom/smsFrom settings were migrated).
+ */
 export interface TenantSettings {
-  // Brand name shown in templates (falls back to APP_NAME).
+  // Brand name shown in templates as {{appName}} (falls back to APP_NAME).
   appName?: string;
-  // "From" address for emails (falls back to MAIL_FROM).
-  emailFrom?: string;
-  // Sender number / alphanumeric id for SMS (falls back to provider default).
-  smsFrom?: string;
 }
 
 /**
- * A white-label client. Owns its API keys, notifications and devices
- * (all deleted with it via ON DELETE CASCADE).
+ * A white-label client. Owns its API keys, notifications, devices,
+ * templates, senders and provider configs (all deleted with it via
+ * ON DELETE CASCADE).
  */
 @Entity('tenants')
 @Unique('uq_tenants_slug', ['slug'])
@@ -45,7 +45,8 @@ export class Tenant {
   @Column({ type: 'jsonb', default: () => "'{}'::jsonb" })
   settings: TenantSettings;
 
-  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
+  // Millisecond precision, like the JS Dates in pagination cursors.
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz', precision: 3 })
   createdAt: Date;
 
   @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' })

@@ -1,0 +1,39 @@
+// Types shared by every Communication Hub service.
+//
+// Conventions (apply to all files in this package):
+//   - Every RPC needs credentials in metadata: `x-api-key` for tenant
+//     services, `x-admin-key` for *AdminService. Optional metadata:
+//     `x-request-id` (log correlation), `language` (error message locale).
+//   - Errors use standard gRPC status codes. The machine-readable error type
+//     (e.g. TEMPLATE_NOT_FOUND) is in the `error-type` trailing metadata,
+//     extra context as JSON in `error-data`.
+//   - Fields marked `optional` have presence: leave them unset for "not given".
+syntax = "proto3";
+
+package communication_hub.v1;
+
+// Delivery channel.
+enum Channel {
+  CHANNEL_UNSPECIFIED = 0;
+  // recipient = email address
+  CHANNEL_EMAIL = 1;
+  // recipient = E.164 phone number
+  CHANNEL_SMS = 2;
+  // recipient = device token, or user_id to reach every registered device
+  CHANNEL_PUSH = 3;
+  // user_id only: stored in the user's inbox (InboxService) and signalled
+  // to the user's devices through FCM
+  CHANNEL_IN_APP = 4;
+}
+
+// Keyset pagination request: pass PageInfo.next_cursor back as `cursor`.
+message PageRequest {
+  // 1-100, default 20.
+  int32 limit = 1;
+  optional string cursor = 2;
+}
+
+// Keyset pagination result. `next_cursor` is unset on the last page.
+message PageInfo {
+  optional string next_cursor = 1;
+}

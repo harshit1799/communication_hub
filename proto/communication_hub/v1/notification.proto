@@ -1,0 +1,167 @@
+// Sending notifications and reading their delivery status (tenant API key).
+syntax = "proto3";
+
+package communication_hub.v1;
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+import "communication_hub/v1/common.proto";
+
+service NotificationService {
+  // Accepts one notification for asynchronous delivery. With an
+  // idempotency_key, a repeated request returns the original notification
+  // (replayed = true) and nothing is sent again.
+  rpc SendNotification(SendNotificationRequest) returns (SendNotificationResponse);
+  // Up to 500 notifications in one call; low priority by default (campaigns).
+  rpc SendBulkNotifications(SendBulkNotificationsRequest) returns (SendBulkNotificationsResponse);
+  // One notification with its delivery attempts.
+  rpc GetNotification(NotificationRef) returns (NotificationDetails);
+  // The tenant's notifications, newest first.
+  rpc ListNotifications(ListNotificationsRequest) returns (ListNotificationsResponse);
+  // Re-queues a FAILED notification (FAILED_PRECONDITION otherwise).
+  rpc RetryNotification(NotificationRef) returns (Notification);
+  // Cancels a QUEUED/RETRYING notification (FAILED_PRECONDITION otherwise).
+  rpc CancelNotification(NotificationRef) returns (Notification);
+}
+
+enum NotificationStatus {
+  NOTIFICATION_STATUS_UNSPECIFIED = 0;
+  NOTIFICATION_STATUS_QUEUED = 1;
+  NOTIFICATION_STATUS_PROCESSING = 2;
+  NOTIFICATION_STATUS_RETRYING = 3;
+  NOTIFICATION_STATUS_SENT = 4;
+  NOTIFICATION_STATUS_FAILED = 5;
+  NOTIFICATION_STATUS_CANCELLED = 6;
+}
+
+// Delivery order within a channel. Unspecified = NORMAL for single sends,
+// LOW for bulk sends, so campaigns never delay transactional messages.
+enum Priority {
+  PRIORITY_UNSPECIFIED = 0;
+  PRIORITY_HIGH = 1;
+  PRIORITY_NORMAL = 2;
+  PRIORITY_LOW = 3;
+}
+
+// What to send. Content comes from `template` (stored in the hub, see
+// TemplateService) or from inline subject/body.
+//   email: recipient, subject (or template subject), body | template
+//   sms:   recipient (E.164), body | template
+//   push:  recipient (token) | user_id, body | template, subject = title
+//   in-app: user_id, body | template, subject = title, metadata = your
+//          payload (deeplink, ...); also_push for a visible push as well
+message NotificationInput {
+  Channel channel = 1;
+  optional string recipient = 2;
+  optional string user_id = 3;
+  // Overrides the template subject. Supports {{placeholders}}.
+  optional string subject = 4;
+  // Plain-text content when no template is used. Supports {{placeholders}}.
+  optional string body = 5;
+  // Template name; the active version is used unless template_version is set.
+  optional string template = 6;
+  optional int32 template_version = 7;
+  // Values for {{placeholders}}. Stored encrypted.
+  google.protobuf.Struct data = 8;
+  // Your own references; for push also delivered as the FCM data payload.
+  map<string, string> metadata = 9;
+  Priority priority = 10;
+  // Deliver no earlier than this (up to 30 days ahead).
+  google.protobuf.Timestamp scheduled_at = 11;
+  // Unique per tenant; makes client retries safe.
+  optional string idempotency_key = 12;
+  // Email/SMS: send from this sender identity (SenderService). Unset = the
+  // tenant's sender rules, then its default sender for the channel.
+  optional string sender_id = 13;
+  // In-app only. false (default): the inbox item is stored and the user's
+  // devices get a silent data message (the open app refreshes its inbox /
+  // badge). true: the devices also show it as a regular push notification.
+  optional bool also_push = 14;
+}
+
+message SendNotificationRequest {
+  NotificationInput notification = 1;
+}
+
+message SendNotificationResponse {
+  Notification notification = 1;
+  // True when an earlier result was returned for a repeated idempotency_key.
+  bool replayed = 2;
+}
+
+message SendBulkNotificationsRequest {
+  repeated NotificationInput notifications = 1;
+}
+
+message SendBulkNotificationsResponse {
+  int32 accepted = 1;
+  int32 replayed = 2;
+  // In request order.
+  repeated Notification notifications = 3;
+}
+
+message NotificationRef {
+  string id = 1;
+}
+
+message ListNotificationsRequest {
+  PageRequest page = 1;
+  NotificationStatus status = 2;
+  Channel channel = 3;
+  // Exact match (looked up through a keyed hash; recipients are encrypted).
+  optional string recipient = 4;
+  optional string user_id = 5;
+}
+
+message ListNotificationsResponse {
+  repeated Notification notifications = 1;
+  PageInfo page = 2;
+}
+
+message Notification {
+  string id = 1;
+  Channel channel = 2;
+  optional string recipient = 3;
+  optional string user_id = 4;
+  optional string subject = 5;
+  optional string body = 6;
+  optional string template = 7;
+  optional int32 template_version = 8;
+  google.protobuf.Struct data = 9;
+  map<string, string> metadata = 10;
+  NotificationStatus status = 11;
+  Priority priority = 12;
+  optional string idempotency_key = 13;
+  int32 attempts = 14;
+  // Provider that delivered (or last tried), e.g. "ses", "twilio".
+  optional string provider = 15;
+  optional string provider_message_id = 16;
+  optional string error = 17;
+  optional string sender_id = 18;
+  google.protobuf.Timestamp scheduled_at = 19;
+  google.protobuf.Timestamp sent_at = 20;
+  google.protobuf.Timestamp created_at = 21;
+  google.protobuf.Timestamp updated_at = 22;
+  bool also_push = 23;
+}
+
+// One delivery attempt. With failover, one attempt can list several
+// providers (same attempt number, one row per provider tried).
+message DeliveryAttempt {
+  int32 attempt = 1;
+  string provider = 2;
+  // Sender used (email address / SMS sender id), if any.
+  optional string sender = 3;
+  bool success = 4;
+  optional string provider_message_id = 5;
+  optional string error = 6;
+  // True when the error stopped further retries.
+  bool permanent = 7;
+  int32 duration_ms = 8;
+  google.protobuf.Timestamp created_at = 9;
+}
+
+message NotificationDetails {
+  Notification notification = 1;
+  repeated DeliveryAttempt attempts = 2;
+}

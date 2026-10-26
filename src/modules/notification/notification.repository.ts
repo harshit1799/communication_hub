@@ -1,5 +1,6 @@
 /**
- * Data access for the `notifications` table.
+ * Data access for the `notifications` table. `recipient` and `data` are
+ * encrypted/decrypted transparently by their column transformers.
  *
  * Status transitions are conditional updates (WHERE status IN ...), so a
  * worker and a client cancelling the same notification can't both win.
@@ -11,14 +12,34 @@ import { In, Repository } from 'typeorm';
 import type { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity.js';
 import { BaseRepository, CursorPage } from '../../database/postgres/base.repository.js';
 import { IN_FLIGHT_STATUSES, NotificationStatus } from '../../constant/index.js';
-import { ListNotificationsDto } from '../../dto/index.js';
+import { NotificationChannel } from '../../constant/index.js';
 import { Notification } from '../../models/index.js';
 
 /** Columns supplied on insert (the rest have database defaults). */
 export type NewNotification = Omit<
   Notification,
-  'tenant' | 'attemptLog' | 'createdAt' | 'updatedAt' | 'attempts' | 'provider' | 'providerMessageId' | 'error' | 'sentAt'
+  | 'tenant'
+  | 'templateRef'
+  | 'sender'
+  | 'attemptLog'
+  | 'createdAt'
+  | 'updatedAt'
+  | 'attempts'
+  | 'provider'
+  | 'providerMessageId'
+  | 'error'
+  | 'sentAt'
 >;
+
+/** Filters of ListNotifications; the recipient arrives as its blind index. */
+export interface NotificationFilter {
+  status?: NotificationStatus;
+  channel?: NotificationChannel;
+  recipientHash?: string;
+  userId?: string;
+  limit: number;
+  cursor?: string;
+}
 
 /** Every tenant-facing query is scoped by tenant id. */
 @Injectable()
@@ -68,17 +89,17 @@ export class NotificationRepository extends BaseRepository<Notification> {
     return this.findOne({ tenantId, id }, { relations: { attemptLog: true }, order: { attemptLog: { attempt: 'ASC' } } });
   }
 
-  /** For workers: the notification with its tenant (branding/senders). */
+  /** For workers: the notification with its tenant (branding). */
   findWithTenant(id: string): Promise<Notification | null> {
     return this.findOne({ id }, { relations: { tenant: true } });
   }
 
   /** The tenant's notifications, newest first, filtered and cursor-paginated. */
-  list(tenantId: string, query: ListNotificationsDto): Promise<CursorPage<Notification>> {
+  list(tenantId: string, query: NotificationFilter): Promise<CursorPage<Notification>> {
     const qb = this.queryBuilder('n').where('n.tenant_id = :tenantId', { tenantId });
     if (query.status) qb.andWhere('n.status = :status', { status: query.status });
     if (query.channel) qb.andWhere('n.channel = :channel', { channel: query.channel });
-    if (query.recipient) qb.andWhere('n.recipient = :recipient', { recipient: query.recipient });
+    if (query.recipientHash) qb.andWhere('n.recipient_hash = :hash', { hash: query.recipientHash });
     if (query.userId) qb.andWhere('n.user_id = :userId', { userId: query.userId });
     return this.paginateByCursor(qb, 'n', query.limit, query.cursor);
   }

@@ -97,3 +97,9 @@ export class SmsProcessor extends ChannelProcessor {
 export class PushProcessor extends ChannelProcessor {
   protected readonly logger = new Logger(PushProcessor.name);
 }
+
+/** Consumes the in-app queue (inbox write + FCM signal). */
+@Processor(CHANNEL_QUEUE.in_app, MANUAL_START)
+export class InAppProcessor extends ChannelProcessor {
+  protected readonly logger = new Logger(InAppProcessor.name);
+}

@@ -17,6 +17,7 @@ import {
   MinLength,
   validateSync,
 } from 'class-validator';
+import { parseCipherKeys } from '../utils/crypto/field-cipher.js';
 import {
   AppRole,
   DeployEnv,
@@ -51,25 +52,45 @@ class EnvironmentVariables {
   @IsEnum(DeployEnv)
   APP_ENV: DeployEnv = DeployEnv.Local;
 
+  // gRPC API (api / all roles).
   @IsInt()
   @Min(0)
   @Max(65535)
-  PORT: number = 3000;
+  GRPC_PORT: number = 50051;
 
-  @IsString()
-  API_PREFIX: string = 'api';
+  @IsInt()
+  @Min(1024)
+  GRPC_MAX_MESSAGE_BYTES: number = 8 * 1024 * 1024;
 
-  @IsString()
-  CORS_ORIGINS: string = '*';
-
-  @IsIn(['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent'])
-  LOG_LEVEL: string = 'info';
-
+  @IsOptional()
   @IsIn(BOOLEAN)
-  SWAGGER_ENABLED: string = 'true';
+  GRPC_REFLECTION?: string;
+
+  // HTTP/JSON gateway + Swagger (api / all roles); 0 disables.
+  @IsInt()
+  @Min(0)
+  @Max(65535)
+  HTTP_PORT: number = 3000;
+
+  @IsInt()
+  @Min(1024)
+  BODY_LIMIT_BYTES: number = 5 * 1024 * 1024;
+
+  @IsOptional()
+  @IsIn(BOOLEAN)
+  SWAGGER_ENABLED?: string;
 
   @IsString()
   SWAGGER_PATH: string = 'docs';
+
+  // Health + metrics over plain HTTP (every role).
+  @IsInt()
+  @Min(0)
+  @Max(65535)
+  OPS_PORT: number = 9464;
+
+  @IsIn(['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent'])
+  LOG_LEVEL: string = 'info';
 
   @IsString()
   APP_NAME: string = 'Communication Hub';
@@ -137,6 +158,12 @@ class EnvironmentVariables {
   @Min(100)
   QUEUE_BACKOFF_MS: number = 5000;
 
+  // In-app inbox retention.
+  @IsInt()
+  @Min(1)
+  @Max(3650)
+  INBOX_RETENTION_DAYS: number = 90;
+
   // Rate limiting per tenant.
   @IsInt()
   @Min(1)
@@ -163,6 +190,19 @@ class EnvironmentVariables {
   @Min(1)
   @Max(65535)
   SMTP_PORT: number = 587;
+
+  // Send-path configuration caches (seconds).
+  @IsInt()
+  @Min(1)
+  PROVIDER_CACHE_TTL_SECONDS: number = 300;
+
+  @IsInt()
+  @Min(1)
+  SENDER_CACHE_TTL_SECONDS: number = 300;
+
+  @IsInt()
+  @Min(1)
+  TEMPLATE_CACHE_TTL_SECONDS: number = 300;
 
   @IsIn(BOOLEAN)
   SMTP_SECURE: string = 'false';
@@ -192,7 +232,8 @@ const PROVIDER_REQUIREMENTS: Record<string, Record<string, string[][]>> = {
 
 /**
  * Cross-field checks that class-validator can't express: credentials
- * required by the selected providers, and production-only requirements.
+ * required by the selected platform providers, encryption keys, and
+ * production-only requirements.
  * Returns one message per problem.
  */
 function checkProviderRequirements(env: Record<string, unknown>): string[] {
@@ -205,11 +246,22 @@ function checkProviderRequirements(env: Record<string, unknown>): string[] {
       }
     }
   }
+  // Encryption keys are required everywhere: recipients are never stored in clear.
+  try {
+    parseCipherKeys({
+      keys: env.ENCRYPTION_KEYS as string | undefined,
+      activeKeyId: env.ENCRYPTION_ACTIVE_KEY as string | undefined,
+      blindIndexKey: env.BLIND_INDEX_KEY as string | undefined,
+    });
+  } catch (err) {
+    errors.push(...(err as Error).message.split('\n- '));
+  }
   const deployed = env.APP_ENV && env.APP_ENV !== DeployEnv.Local;
   if ((env.NODE_ENV === NodeEnv.Production || deployed) && !env.ADMIN_API_KEY) {
     errors.push(`ADMIN_API_KEY must be set (APP_ENV=${String(env.APP_ENV ?? DeployEnv.Local)})`);
   }
   // Deployed environments must really deliver: console providers only log.
+  // (The platform default is what tenants without provider configs use.)
   if (deployed) {
     for (const selector of ['EMAIL_PROVIDER', 'SMS_PROVIDER', 'PUSH_PROVIDER']) {
       if (!env[selector] || env[selector] === 'console') {

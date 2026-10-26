@@ -5,10 +5,11 @@
  */
 
 import { InjectQueue } from '@nestjs/bullmq';
-import { Injectable } from '@nestjs/common';
+import { Injectable, OnModuleInit } from '@nestjs/common';
 import { JobsOptions, Queue } from 'bullmq';
 import { CHANNEL_QUEUE, NotificationChannel, QUEUE_PRIORITY } from '../../constant/index.js';
 import { Notification } from '../../models/index.js';
+import { MetricsService } from '../../utils/metrics/metrics.service.js';
 
 /** Payload of a delivery job. Postgres holds everything else. */
 export interface NotificationJob {
@@ -20,21 +21,45 @@ export interface NotificationJob {
 /** The notification fields needed to build a job. */
 type Enqueueable = Pick<Notification, 'id' | 'channel' | 'priority' | 'scheduledAt'>;
 
-/** Wraps the three channel queues behind one API. */
+/** Job states reported as queue health (metrics and readiness). */
+const DEPTH_STATES = ['waiting', 'delayed', 'active', 'failed'] as const;
+
+/** Wraps the channel queues behind one API. */
 @Injectable()
-export class NotificationQueue {
+export class NotificationQueue implements OnModuleInit {
   private readonly queues: Record<NotificationChannel, Queue<NotificationJob>>;
 
   constructor(
     @InjectQueue(CHANNEL_QUEUE.email) email: Queue<NotificationJob>,
     @InjectQueue(CHANNEL_QUEUE.sms) sms: Queue<NotificationJob>,
     @InjectQueue(CHANNEL_QUEUE.push) push: Queue<NotificationJob>,
+    @InjectQueue(CHANNEL_QUEUE.in_app) inApp: Queue<NotificationJob>,
+    private readonly metrics: MetricsService,
   ) {
     this.queues = {
       [NotificationChannel.Email]: email,
       [NotificationChannel.Sms]: sms,
       [NotificationChannel.Push]: push,
+      [NotificationChannel.InApp]: inApp,
     };
+  }
+
+  /** Reports queue depth to Prometheus on every scrape. */
+  onModuleInit() {
+    this.metrics.setQueueDepthSource(async () => {
+      const depths = await this.depth();
+      return depths.flatMap((d) => DEPTH_STATES.map((state) => ({ queue: d.name, state, count: d[state] })));
+    });
+  }
+
+  /** Job counts per queue (metrics and readiness). */
+  depth(): Promise<({ name: string } & Record<(typeof DEPTH_STATES)[number], number>)[]> {
+    return Promise.all(
+      this.all().map(async (q) => {
+        const counts = await q.getJobCounts(...DEPTH_STATES);
+        return { name: q.name, waiting: counts.waiting ?? 0, delayed: counts.delayed ?? 0, active: counts.active ?? 0, failed: counts.failed ?? 0 };
+      }),
+    );
   }
 
   /** Enqueues notifications in one round trip per channel. */

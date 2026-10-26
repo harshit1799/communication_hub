@@ -77,13 +77,24 @@ export class FcmPushProvider implements PushProvider {
 
     for (let i = 0; i < message.tokens.length; i += LIMITS.FCM_MULTICAST_MAX) {
       const tokens = message.tokens.slice(i, i + LIMITS.FCM_MULTICAST_MAX);
-      const batch = await this.messaging.sendEachForMulticast({
-        tokens,
-        notification: { title: message.title, body: message.body },
-        data: message.data,
-        android: { priority: 'high' },
-        apns: { payload: { aps: { sound: 'default' } } },
-      });
+      const batch = await this.messaging.sendEachForMulticast(
+        message.silent
+          ? {
+              // Data-only: delivered to the app, nothing shown. iOS needs a
+              // background push (content-available, priority 5).
+              tokens,
+              data: message.data,
+              android: { priority: 'high' },
+              apns: { headers: { 'apns-push-type': 'background', 'apns-priority': '5' }, payload: { aps: { contentAvailable: true } } },
+            }
+          : {
+              tokens,
+              notification: { title: message.title, body: message.body },
+              data: message.data,
+              android: { priority: 'high' },
+              apns: { payload: { aps: { sound: 'default' } } },
+            },
+      );
       batch.responses.forEach((response, index) => {
         if (response.success) {
           delivered++;
@@ -117,8 +128,7 @@ export class FcmPushProvider implements PushProvider {
     );
   }
 
-  /** Deletes the firebase-admin app (closes its HTTP connections). */
-  /** Startup log label. */
+  /** Log label (no secrets). */
   describe(): string {
     return `Firebase Cloud Messaging (project ${this.projectId ?? 'from default credentials'})`;
   }
@@ -128,6 +138,7 @@ export class FcmPushProvider implements PushProvider {
     await this.app.options.credential!.getAccessToken();
   }
 
+  /** Deletes the firebase-admin app (closes its HTTP connections). */
   async close(): Promise<void> {
     await deleteApp(this.app);
   }

@@ -70,6 +70,38 @@ export class RedisService implements OnApplicationShutdown {
     await this.client.set(this.key(key), JSON.stringify(value), 'EX', ttlSeconds);
   }
 
+  /**
+   * Cache-aside read: the cached value, or `load()` stored for `ttlSeconds`.
+   * Redis being down never fails the caller: reads and writes fall back to
+   * `load()` (Postgres), logged at debug level so an outage doesn't flood
+   * the logs (the connection events above already report it).
+   */
+  async cached<T>(key: string, ttlSeconds: number, load: () => Promise<T>): Promise<T> {
+    try {
+      const hit = await this.getJson<T>(key);
+      if (hit !== null) return hit;
+    } catch (err) {
+      this.logger.debug(`Cache read ${key} failed, loading from source: ${(err as Error).message}`);
+    }
+    const value = await load();
+    this.setJson(key, value, ttlSeconds).catch((err: Error) =>
+      this.logger.debug(`Cache write ${key} failed: ${err.message}`),
+    );
+    return value;
+  }
+
+  /**
+   * Drops cache entries after a configuration change. Failure is logged,
+   * not thrown: the entry still expires with its TTL.
+   */
+  async invalidate(...keys: string[]): Promise<void> {
+    try {
+      await this.del(...keys);
+    } catch (err) {
+      this.logger.error(`Cache invalidation failed for ${keys.join(', ')}: ${(err as Error).message}`);
+    }
+  }
+
   /** Deletes keys (one command per key, cluster-safe). */
   async del(...keys: string[]): Promise<void> {
     if (keys.length === 0) return;

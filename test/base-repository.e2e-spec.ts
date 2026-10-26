@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
 import configuration from '../src/config/configuration.js';
 import { buildDataSourceOptions } from '../src/database/postgres/postgres.options.js';
+import { configureFieldCipher } from '../src/utils/crypto/crypto.module.js';
 import { Tenant } from '../src/models/index.js';
 import { TenantRepository } from '../src/modules/tenant/tenant.repository.js';
 
@@ -31,6 +32,8 @@ describe('BaseRepository (PostgreSQL)', () => {
   const slug = (n: number | string) => `${prefix}${n}`;
 
   beforeAll(async () => {
+    // Encrypted columns (and the migrations) need the cipher, as in the app.
+    configureFieldCipher(configuration().app.crypto);
     dataSource = new DataSource({ ...buildDataSourceOptions(configuration().app.database), migrationsRun: true });
     await dataSource.initialize();
     await dataSource.runMigrations();
@@ -111,7 +114,11 @@ describe('BaseRepository (PostgreSQL)', () => {
       seen.push(...page.data.map((t) => t.name));
       cursor = page.nextCursor ?? undefined;
     } while (cursor);
-    expect(seen).toEqual(['P4', 'P3', 'P2', 'P1', 'P0']);
+    // Every row exactly once, in the order of one unpaginated query (rows
+    // created in the same millisecond are ordered by id, the tie-breaker).
+    const all = await repo.page(100, undefined, pagePrefix);
+    expect(seen).toEqual(all.data.map((t) => t.name));
+    expect([...seen].sort()).toEqual(['P0', 'P1', 'P2', 'P3', 'P4']);
   });
 
   it('transaction commits all or nothing', async () => {

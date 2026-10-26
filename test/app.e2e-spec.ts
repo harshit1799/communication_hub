@@ -1,204 +1,172 @@
 /**
- * End-to-end tests. Boots the full application (API + workers) on Fastify
- * in memory and sends real HTTP requests with fastify.inject(). Needs a
+ * End-to-end tests over gRPC. Boots the full application (gRPC server +
+ * workers) and calls it with a real gRPC client built from proto/. Needs a
  * running PostgreSQL and Redis; the test database is created by
  * `createdb communication_hub_test` (see vitest.config.e2e.ts).
  */
 
-import { ConfigService } from '@nestjs/config';
-import { NestFastifyApplication } from '@nestjs/platform-fastify';
-import { Test } from '@nestjs/testing';
+import { status } from '@grpc/grpc-js';
 import { randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
-import { AppModule } from '../src/app.module.js';
-import { configureApp, createFastifyAdapter } from '../src/app.setup.js';
-import { AppConfig } from '../src/config/configuration.js';
+import { Hub, Msg, startHub, struct, timestamp, unstruct } from './support/grpc-hub.js';
 
-/** Admin header matching ADMIN_API_KEY in vitest.config.e2e.ts. */
-const ADMIN = { 'x-admin-key': 'e2e-admin-key-0123456789abcdef0123456789' };
-
-describe('Communication Hub (e2e)', () => {
-  let app: NestFastifyApplication;
+describe('Communication Hub over gRPC (e2e)', () => {
+  let hub: Hub;
   // A fresh tenant per run, so runs never see each other's data.
-  let tenant: { 'x-api-key': string };
+  let key: string;
 
-  const call = async (method: 'GET' | 'POST' | 'PATCH' | 'DELETE', url: string, options: { headers?: Record<string, string>; body?: unknown } = {}) => {
-    const res = await app.inject({ method, url, headers: options.headers, payload: options.body as object });
-    return { status: res.statusCode, body: res.json(), headers: res.headers };
-  };
-
-  /** Polls until the worker has moved the notification out of in-flight states. */
-  const waitForFinalStatus = async (id: string) => {
-    for (let i = 0; i < 50; i++) {
-      const { body } = await call('GET', `/api/v1/notifications/${id}`, { headers: tenant });
-      if (!['queued', 'processing', 'retrying'].includes(body.data.status)) return body.data;
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    throw new Error(`notification ${id} did not finish`);
-  };
+  const send = (notification: object, extra?: Record<string, string>) =>
+    hub.call('NotificationService', 'SendNotification', { notification }, hub.tenant(key, extra));
 
   beforeAll(async () => {
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    const config = moduleRef.get(ConfigService).getOrThrow<AppConfig>('app');
-    app = moduleRef.createNestApplication<NestFastifyApplication>(createFastifyAdapter(config.bodyLimit));
-    await configureApp(app, config);
-    await app.init();
-    await app.getHttpAdapter().getInstance().ready();
-
-    const slug = `e2e-${randomUUID().slice(0, 8)}`;
-    const { body } = await call('POST', '/api/v1/admin/tenants', {
-      headers: ADMIN,
-      body: { name: 'E2E', slug, settings: { appName: 'E2E Brand' } },
-    });
-    tenant = { 'x-api-key': body.data.apiKey.key };
+    hub = await startHub();
+    ({ key } = await hub.createTenant({ appName: 'E2E Brand' }));
   });
 
   afterAll(async () => {
-    await app?.close();
-  });
-
-  it('GET /api/health and /api/health/ready', async () => {
-    expect((await call('GET', '/api/health')).body.data.status).toBe('ok');
-    const ready = await call('GET', '/api/health/ready');
-    expect(ready.status).toBe(200);
-    expect(ready.body.data).toMatchObject({ database: 'up', redis: 'up' });
+    await hub?.close();
   });
 
   it('requires an API key and rejects unknown ones', async () => {
-    const missing = await call('POST', '/api/v1/notifications', { body: {} });
-    expect(missing).toMatchObject({ status: 401, body: { type: 'API_KEY_MISSING' } });
-    const invalid = await call('GET', '/api/v1/notifications', { headers: { 'x-api-key': 'chk_nope' } });
-    expect(invalid.body.type).toBe('API_KEY_INVALID');
+    await hub.expectError(hub.call('NotificationService', 'ListNotifications', {}), status.UNAUTHENTICATED, 'API_KEY_MISSING');
+    await hub.expectError(hub.call('NotificationService', 'ListNotifications', {}, hub.tenant('chk_nope')), status.UNAUTHENTICATED, 'API_KEY_INVALID');
   });
 
-  it('protects admin routes', async () => {
-    const res = await call('GET', '/api/v1/admin/tenants', { headers: tenant });
-    expect(res).toMatchObject({ status: 401, body: { type: 'ADMIN_KEY_INVALID' } });
+  it('protects admin services', async () => {
+    await hub.expectError(hub.call('TenantAdminService', 'ListTenants', {}, hub.tenant(key)), status.UNAUTHENTICATED, 'ADMIN_KEY_INVALID');
   });
 
   it('validates the payload per channel', async () => {
-    const res = await call('POST', '/api/v1/notifications', {
-      headers: tenant,
-      body: { channel: 'sms', recipient: '4155550123', body: 'hi' },
-    });
-    expect(res.status).toBe(400);
-    expect(res.body).toMatchObject({ type: 'VALIDATION_ERROR' });
-    expect(res.body.message).toContain('E.164');
+    const err = await hub.expectError(
+      send({ channel: 'CHANNEL_SMS', recipient: '4155550123', body: 'hi' }),
+      status.INVALID_ARGUMENT,
+      'VALIDATION_ERROR',
+    );
+    expect(err.details).toContain('E.164');
+    expect(JSON.parse(err.metadata.get('error-data')[0] as string).errors[0]).toContain('E.164');
   });
 
   it('rejects unknown templates before storing anything', async () => {
-    const res = await call('POST', '/api/v1/notifications', {
-      headers: tenant,
-      body: { channel: 'email', recipient: 'a@b.com', subject: 'Hi', template: 'nope' },
-    });
-    expect(res).toMatchObject({ status: 400, body: { type: 'TEMPLATE_NOT_FOUND' } });
+    await hub.expectError(
+      send({ channel: 'CHANNEL_EMAIL', recipient: 'a@b.com', subject: 'Hi', template: 'nope' }),
+      status.NOT_FOUND,
+      'TEMPLATE_NOT_FOUND',
+    );
   });
 
-  it('accepts an email, delivers it in the worker and records the attempt', async () => {
-    const res = await call('POST', '/api/v1/notifications', {
-      headers: { ...tenant, 'x-request-id': 'e2e-req-1' },
-      body: { channel: 'email', recipient: 'jane@example.com', subject: 'Code {{code}}', template: 'otp', data: { code: '123456' } },
-    });
-    expect(res.status).toBe(202);
-    expect(res.headers['x-request-id']).toBe('e2e-req-1');
-    expect(res.body).toMatchObject({ type: 'NOTIFICATION_ACCEPTED', data: { status: 'queued' } });
+  it('accepts an email, delivers it with the starter template and records the attempt', async () => {
+    const res = await send(
+      { channel: 'CHANNEL_EMAIL', recipient: 'jane@example.com', subject: 'Code {{code}}', template: 'otp', data: struct({ code: '123456' }) },
+      { 'x-request-id': 'e2e-req-1' },
+    );
+    expect(res).toMatchObject({ replayed: false, notification: { status: 'NOTIFICATION_STATUS_QUEUED', templateVersion: 1 } });
 
-    const done = await waitForFinalStatus(res.body.data.id);
-    expect(done).toMatchObject({ status: 'sent', attempts: 1, provider: 'console' });
-    expect(done.attemptLog).toHaveLength(1);
+    const { notification, attempts } = await hub.waitForFinal(key, res.notification.id);
+    expect(notification).toMatchObject({ status: 'NOTIFICATION_STATUS_SENT', attempts: 1, provider: 'console' });
+    expect(attempts).toHaveLength(1);
 
-    const [row] = await app
+    const [row] = await hub.moduleRef
       .get(DataSource)
-      .query('SELECT status, sent_at IS NOT NULL AS has_sent_at FROM notifications WHERE id = $1', [done.id]);
+      .query('SELECT status, sent_at IS NOT NULL AS has_sent_at FROM notifications WHERE id = $1', [notification.id]);
     expect(row).toEqual({ status: 'sent', has_sent_at: true });
   });
 
+  it('stores recipients and data encrypted, and finds them through the blind index', async () => {
+    const recipient = `secret-${randomUUID().slice(0, 6)}@Example.com`;
+    const res = await send({ channel: 'CHANNEL_EMAIL', recipient, subject: 'Hi', body: 'Code {{code}}', data: struct({ code: '987654' }) });
+
+    const [row] = await hub.moduleRef
+      .get(DataSource)
+      .query('SELECT recipient, recipient_hash, data FROM notifications WHERE id = $1', [res.notification.id]);
+    expect(row.recipient).toMatch(/^enc:v1:e2e:/);
+    expect(row.recipient).not.toContain('secret');
+    expect(row.data).toMatch(/^enc:v1:e2e:/);
+    expect(row.data).not.toContain('987654');
+    expect(row.recipient_hash).toMatch(/^[0-9a-f]{64}$/);
+
+    // Reads decrypt; lookups by recipient work (case-insensitively for email).
+    expect(res.notification.recipient).toBe(recipient);
+    expect(unstruct(res.notification.data)).toEqual({ code: '987654' });
+    const found = await hub.call('NotificationService', 'ListNotifications', { recipient: recipient.toLowerCase() }, hub.tenant(key));
+    expect(found.notifications.map((n: { id: string }) => n.id)).toEqual([res.notification.id]);
+  });
+
   it('is idempotent per idempotency key', async () => {
-    const body = { channel: 'sms', recipient: '+14155550123', body: 'once', idempotencyKey: `k-${randomUUID()}` };
-    const first = await call('POST', '/api/v1/notifications', { headers: tenant, body });
-    const second = await call('POST', '/api/v1/notifications', { headers: tenant, body: { ...body, body: 'twice?' } });
-    expect(second.body.data.id).toBe(first.body.data.id);
-    expect(second.body.data.body).toBe('once');
+    const notification = { channel: 'CHANNEL_SMS', recipient: '+14155550123', body: 'once', idempotencyKey: `k-${randomUUID()}` };
+    const first = await send(notification);
+    const second = await send({ ...notification, body: 'twice?' });
+    expect(second).toMatchObject({ replayed: true, notification: { id: first.notification.id, body: 'once' } });
   });
 
   it('sends in bulk, keeping request order and resolving duplicates', async () => {
-    const key = `k-${randomUUID()}`;
-    const original = await call('POST', '/api/v1/notifications', {
-      headers: tenant,
-      body: { channel: 'sms', recipient: '+14155550100', body: 'a', idempotencyKey: key },
-    });
-    const res = await call('POST', '/api/v1/notifications/bulk', {
-      headers: tenant,
-      body: {
+    const idempotencyKey = `k-${randomUUID()}`;
+    const original = await send({ channel: 'CHANNEL_SMS', recipient: '+14155550100', body: 'a', idempotencyKey });
+    const res = await hub.call(
+      'NotificationService',
+      'SendBulkNotifications',
+      {
         notifications: [
-          { channel: 'sms', recipient: '+14155550100', body: 'a', idempotencyKey: key },
-          { channel: 'sms', recipient: '+14155550101', body: 'b' },
-          { channel: 'email', recipient: 'c@example.com', subject: 's', body: 'c' },
+          { channel: 'CHANNEL_SMS', recipient: '+14155550100', body: 'a', idempotencyKey },
+          { channel: 'CHANNEL_SMS', recipient: '+14155550101', body: 'b' },
+          { channel: 'CHANNEL_EMAIL', recipient: 'c@example.com', subject: 's', body: 'c' },
         ],
       },
-    });
-    expect(res.status).toBe(202);
-    const items = res.body.data.notifications;
-    expect(items.map((n: { recipient: string }) => n.recipient)).toEqual(['+14155550100', '+14155550101', 'c@example.com']);
-    expect(items[0].id).toBe(original.body.data.id);
-    expect(new Set(items.map((n: { id: string }) => n.id)).size).toBe(3);
+      hub.tenant(key),
+    );
+    expect(res).toMatchObject({ accepted: 3, replayed: 1 });
+    expect(res.notifications.map((n: { recipient: string }) => n.recipient)).toEqual(['+14155550100', '+14155550101', 'c@example.com']);
+    expect(res.notifications[0].id).toBe(original.notification.id);
+    expect(new Set(res.notifications.map((n: { id: string }) => n.id)).size).toBe(3);
   });
 
   it('pushes to every registered device of a user', async () => {
-    await call('POST', '/api/v1/devices', { headers: tenant, body: { userId: 'u-1', token: `tok-${randomUUID()}`, platform: 'android' } });
-    const res = await call('POST', '/api/v1/notifications', {
-      headers: tenant,
-      body: { channel: 'push', userId: 'u-1', subject: 'Hi', template: 'welcome', data: { name: 'Jane' } },
-    });
-    expect((await waitForFinalStatus(res.body.data.id)).status).toBe('sent');
+    await hub.call('DeviceService', 'RegisterDevice', { userId: 'u-1', token: `tok-${randomUUID()}`, platform: 'DEVICE_PLATFORM_ANDROID' }, hub.tenant(key));
+    const res = await send({ channel: 'CHANNEL_PUSH', userId: 'u-1', subject: 'Hi', template: 'welcome', data: struct({ name: 'Jane' }) });
+    expect((await hub.waitForFinal(key, res.notification.id)).notification.status).toBe('NOTIFICATION_STATUS_SENT');
   });
 
   it('fails permanently without retries when a user has no devices, and can be retried', async () => {
-    const res = await call('POST', '/api/v1/notifications', {
-      headers: tenant,
-      body: { channel: 'push', userId: 'nobody', body: 'hi' },
-    });
-    const failed = await waitForFinalStatus(res.body.data.id);
-    expect(failed).toMatchObject({ status: 'failed', attempts: 1 });
-    expect(failed.attemptLog[0].permanent).toBe(true);
+    const res = await send({ channel: 'CHANNEL_PUSH', userId: 'nobody', body: 'hi' });
+    const failed = await hub.waitForFinal(key, res.notification.id);
+    expect(failed.notification).toMatchObject({ status: 'NOTIFICATION_STATUS_FAILED', attempts: 1 });
+    expect(failed.attempts[0].permanent).toBe(true);
 
-    await call('POST', '/api/v1/devices', { headers: tenant, body: { userId: 'nobody', token: `tok-${randomUUID()}`, platform: 'ios' } });
-    const retried = await call('POST', `/api/v1/notifications/${failed.id}/retry`, { headers: tenant });
-    expect(retried.status).toBe(202);
-    expect((await waitForFinalStatus(failed.id)).status).toBe('sent');
+    await hub.call('DeviceService', 'RegisterDevice', { userId: 'nobody', token: `tok-${randomUUID()}`, platform: 'DEVICE_PLATFORM_IOS' }, hub.tenant(key));
+    const retried = await hub.call('NotificationService', 'RetryNotification', { id: res.notification.id }, hub.tenant(key));
+    expect(retried.status).toBe('NOTIFICATION_STATUS_QUEUED');
+    expect((await hub.waitForFinal(key, res.notification.id)).notification.status).toBe('NOTIFICATION_STATUS_SENT');
   });
 
   it('cancels a scheduled notification', async () => {
-    const res = await call('POST', '/api/v1/notifications', {
-      headers: tenant,
-      body: { channel: 'sms', recipient: '+14155550123', body: 'later', scheduledAt: new Date(Date.now() + 3_600_000).toISOString() },
-    });
-    const cancelled = await call('POST', `/api/v1/notifications/${res.body.data.id}/cancel`, { headers: tenant });
-    expect(cancelled.body.data.status).toBe('cancelled');
-    const again = await call('POST', `/api/v1/notifications/${res.body.data.id}/cancel`, { headers: tenant });
-    expect(again).toMatchObject({ status: 409, body: { type: 'NOTIFICATION_NOT_CANCELLABLE' } });
+    const res = await send({ channel: 'CHANNEL_SMS', recipient: '+14155550123', body: 'later', scheduledAt: timestamp(new Date(Date.now() + 3_600_000)) });
+    const cancelled = await hub.call('NotificationService', 'CancelNotification', { id: res.notification.id }, hub.tenant(key));
+    expect(cancelled.status).toBe('NOTIFICATION_STATUS_CANCELLED');
+    await hub.expectError(
+      hub.call('NotificationService', 'CancelNotification', { id: res.notification.id }, hub.tenant(key)),
+      status.FAILED_PRECONDITION,
+      'NOTIFICATION_NOT_CANCELLABLE',
+    );
   });
 
   it('paginates with a cursor', async () => {
-    const first = await call('GET', '/api/v1/notifications?limit=2', { headers: tenant });
-    expect(first.body.data.data).toHaveLength(2);
-    const second = await call('GET', `/api/v1/notifications?limit=2&cursor=${first.body.data.nextCursor}`, { headers: tenant });
-    const ids = (page: { body: { data: { data: { id: string }[] } } }) => page.body.data.data.map((n) => n.id);
-    expect(ids(second).some((id: string) => ids(first).includes(id))).toBe(false);
+    const first = await hub.call('NotificationService', 'ListNotifications', { page: { limit: 2 } }, hub.tenant(key));
+    expect(first.notifications).toHaveLength(2);
+    const second = await hub.call('NotificationService', 'ListNotifications', { page: { limit: 2, cursor: first.page.nextCursor } }, hub.tenant(key));
+    const ids = (page: Msg): string[] => page.notifications.map((n: Msg) => n.id);
+    expect(ids(second).some((id) => ids(first).includes(id))).toBe(false);
   });
 
   it('isolates tenants and revokes keys immediately', async () => {
-    const other = await call('POST', '/api/v1/admin/tenants', {
-      headers: ADMIN,
-      body: { name: 'Other', slug: `e2e-${randomUUID().slice(0, 8)}` },
-    });
-    const otherKey = { 'x-api-key': other.body.data.apiKey.key };
-    const mine = await call('GET', '/api/v1/notifications?limit=1', { headers: tenant });
-    const peek = await call('GET', `/api/v1/notifications/${mine.body.data.data[0].id}`, { headers: otherKey });
-    expect(peek.status).toBe(404);
+    const created = await hub.call('TenantAdminService', 'CreateTenant', { name: 'Other', slug: `e2e-${randomUUID().slice(0, 8)}` }, hub.admin());
+    const otherKey = created.apiKey.key as string;
+    const mine = await hub.call('NotificationService', 'ListNotifications', { page: { limit: 1 } }, hub.tenant(key));
+    await hub.expectError(
+      hub.call('NotificationService', 'GetNotification', { id: mine.notifications[0].id }, hub.tenant(otherKey)),
+      status.NOT_FOUND,
+      'NOTIFICATION_NOT_FOUND',
+    );
 
-    const { id } = other.body.data.tenant;
-    await call('DELETE', `/api/v1/admin/tenants/${id}/api-keys/${other.body.data.apiKey.id}`, { headers: ADMIN });
-    expect((await call('GET', '/api/v1/notifications', { headers: otherKey })).status).toBe(401);
+    await hub.call('TenantAdminService', 'RevokeApiKey', { tenantId: created.tenant.id, keyId: created.apiKey.apiKey.id }, hub.admin());
+    await hub.expectError(hub.call('NotificationService', 'ListNotifications', {}, hub.tenant(otherKey)), status.UNAUTHENTICATED, 'API_KEY_INVALID');
   });
 });

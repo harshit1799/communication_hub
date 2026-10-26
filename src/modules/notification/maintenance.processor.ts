@@ -1,5 +1,11 @@
 /**
- * Self-healing sweeper, run every minute through a BullMQ job scheduler.
+ * Maintenance jobs, run through BullMQ job schedulers (exactly one worker
+ * in the cluster runs each tick):
+ *
+ *   requeue-stuck  every minute: the self-healing sweeper below
+ *   purge-inbox    hourly: deletes expired in-app inbox messages
+ *
+ * Self-healing sweeper:
  * Because it is a queue job, exactly one worker in the cluster runs it per
  * tick, however many replicas there are.
  *
@@ -16,6 +22,8 @@ import { AppConfig } from '../../config/configuration.js';
 import { LIMITS, MAINTENANCE_JOB, MAINTENANCE_QUEUE } from '../../constant/index.js';
 import { errorMessage } from '../../utils/appUtils.js';
 import { ConnectionState } from '../../utils/connection-state.js';
+import { MetricsService } from '../../utils/metrics/metrics.service.js';
+import { InboxService } from '../inbox/inbox.service.js';
 import { NotificationQueue } from './notification.queue.js';
 import { NotificationRepository } from './notification.repository.js';
 
@@ -28,6 +36,8 @@ export class MaintenanceProcessor extends WorkerHost {
   constructor(
     private readonly notifications: NotificationRepository,
     private readonly queue: NotificationQueue,
+    private readonly metrics: MetricsService,
+    private readonly inbox: InboxService,
     config: ConfigService,
   ) {
     super();
@@ -58,8 +68,9 @@ export class MaintenanceProcessor extends WorkerHost {
    * Re-enqueues up to LIMITS.SWEEP_BATCH stuck notifications. One
    * failing row is logged and skipped, so it can't block the rest.
    */
-  async process(job: Job): Promise<{ requeued: number }> {
-    if (job.name !== MAINTENANCE_JOB.REQUEUE_STUCK) return { requeued: 0 };
+  async process(job: Job): Promise<{ requeued?: number; purged?: number }> {
+    if (job.name === MAINTENANCE_JOB.PURGE_INBOX) return { purged: await this.purgeInbox() };
+    if (job.name !== MAINTENANCE_JOB.REQUEUE_STUCK) return {};
 
     const stuck = await this.notifications.claimStuck(
       new Date(Date.now() - this.stuckAfterMs),
@@ -74,7 +85,16 @@ export class MaintenanceProcessor extends WorkerHost {
         this.logger.error(`Could not re-enqueue ${n.id}: ${errorMessage(err)}`);
       }
     }
-    if (stuck.length > 0) this.logger.warn(`Re-checked ${stuck.length} stuck notifications`);
+    this.metrics.requeued.inc(requeued);
+    if (stuck.length > 0) this.logger.warn({ msg: `Re-checked ${stuck.length} stuck notifications`, event: 'sweeper_requeued', count: stuck.length });
     return { requeued };
+  }
+
+  /** Deletes expired inbox messages (INBOX_RETENTION_DAYS). */
+  private async purgeInbox(): Promise<number> {
+    const purged = await this.inbox.purgeExpired();
+    this.metrics.inboxPurged.inc(purged);
+    if (purged > 0) this.logger.log({ msg: `Purged ${purged} expired inbox messages`, event: 'inbox_purged', count: purged });
+    return purged;
   }
 }

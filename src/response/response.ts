@@ -1,36 +1,11 @@
 /**
- * Response message types, same convention as the backend service: every
- * response carries a machine-readable `type`, which i18n/<lang>/messages.json
- * translates into the human-readable `message`.
+ * Error types, same convention as the backend service: every error carries
+ * a machine-readable `type` (gRPC trailing metadata `error-type`), which
+ * i18n/<lang>/messages.json translates into the status message. `status` is
+ * the HTTP-style status; RpcExceptionFilter maps it to a gRPC code.
  */
 
 import { HttpStatus } from '@nestjs/common';
-
-/** Success types, set on handlers with @ResponseMessage(). */
-export const SUCCESS = {
-  OK: 'OK',
-  // Notifications
-  NOTIFICATION_ACCEPTED: 'NOTIFICATION_ACCEPTED',
-  NOTIFICATIONS_ACCEPTED: 'NOTIFICATIONS_ACCEPTED',
-  NOTIFICATION_LISTING: 'NOTIFICATION_LISTING',
-  NOTIFICATION_DETAILS: 'NOTIFICATION_DETAILS',
-  NOTIFICATION_RETRIED: 'NOTIFICATION_RETRIED',
-  NOTIFICATION_CANCELLED: 'NOTIFICATION_CANCELLED',
-  // Devices
-  DEVICE_REGISTERED: 'DEVICE_REGISTERED',
-  DEVICE_UNREGISTERED: 'DEVICE_UNREGISTERED',
-  DEVICE_LISTING: 'DEVICE_LISTING',
-  // Tenants (admin)
-  TENANT_CREATED: 'TENANT_CREATED',
-  TENANT_UPDATED: 'TENANT_UPDATED',
-  TENANT_LISTING: 'TENANT_LISTING',
-  TENANT_DETAILS: 'TENANT_DETAILS',
-  API_KEY_CREATED: 'API_KEY_CREATED',
-  API_KEY_LISTING: 'API_KEY_LISTING',
-  API_KEY_REVOKED: 'API_KEY_REVOKED',
-  // Health
-  HEALTHY: 'HEALTHY',
-};
 
 /** An error type and the HTTP status it is returned with. */
 export interface ErrorDefinition {
@@ -72,19 +47,11 @@ export const ERROR = {
   },
   TEMPLATE_NOT_FOUND: {
     type: 'TEMPLATE_NOT_FOUND',
-    status: HttpStatus.BAD_REQUEST,
+    status: HttpStatus.NOT_FOUND,
   },
   TEMPLATE_RENDER_FAILED: {
     type: 'TEMPLATE_RENDER_FAILED',
     status: HttpStatus.BAD_REQUEST,
-  },
-  IDEMPOTENCY_KEY_INVALID: {
-    type: 'IDEMPOTENCY_KEY_INVALID',
-    status: HttpStatus.BAD_REQUEST,
-  },
-  IDEMPOTENCY_KEY_MISMATCH: {
-    type: 'IDEMPOTENCY_KEY_MISMATCH',
-    status: HttpStatus.UNPROCESSABLE_ENTITY,
   },
   NOTIFICATION_NOT_RETRYABLE: {
     type: 'NOTIFICATION_NOT_RETRYABLE',
@@ -94,6 +61,21 @@ export const ERROR = {
     type: 'NOTIFICATION_NOT_CANCELLABLE',
     status: HttpStatus.CONFLICT,
   },
+  // Templates
+  TEMPLATE_NAME_TAKEN: { type: 'TEMPLATE_NAME_TAKEN', status: HttpStatus.CONFLICT },
+  TEMPLATE_VERSION_NOT_FOUND: { type: 'TEMPLATE_VERSION_NOT_FOUND', status: HttpStatus.NOT_FOUND },
+  TEMPLATE_ARCHIVED: { type: 'TEMPLATE_ARCHIVED', status: HttpStatus.CONFLICT },
+  TEMPLATE_INVALID: { type: 'TEMPLATE_INVALID', status: HttpStatus.BAD_REQUEST },
+  // Senders
+  SENDER_NOT_FOUND: { type: 'SENDER_NOT_FOUND', status: HttpStatus.NOT_FOUND },
+  SENDER_VALUE_TAKEN: { type: 'SENDER_VALUE_TAKEN', status: HttpStatus.CONFLICT },
+  SENDER_RULE_NOT_FOUND: { type: 'SENDER_RULE_NOT_FOUND', status: HttpStatus.NOT_FOUND },
+  // Providers
+  PROVIDER_CONFIG_NOT_FOUND: { type: 'PROVIDER_CONFIG_NOT_FOUND', status: HttpStatus.NOT_FOUND },
+  PROVIDER_CONFIG_INVALID: { type: 'PROVIDER_CONFIG_INVALID', status: HttpStatus.BAD_REQUEST },
+  PROVIDER_NAME_TAKEN: { type: 'PROVIDER_NAME_TAKEN', status: HttpStatus.CONFLICT },
+  // Inbox
+  INBOX_MESSAGE_NOT_FOUND: { type: 'INBOX_MESSAGE_NOT_FOUND', status: HttpStatus.NOT_FOUND },
   // Devices
   DEVICE_NOT_FOUND: { type: 'DEVICE_NOT_FOUND', status: HttpStatus.NOT_FOUND },
   // Tenants

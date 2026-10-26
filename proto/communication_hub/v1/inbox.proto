@@ -1,0 +1,71 @@
+// In-app inbox of a tenant's users (tenant API key).
+//
+// Messages arrive through NotificationService with CHANNEL_IN_APP. Call
+// these RPCs from your backend on behalf of the signed-in user (never ship
+// the tenant API key in an app). After each new message the user's devices
+// receive an FCM data message:
+//   { "type": "inbox", "inboxMessageId": "...", "notificationId": "...", "unreadCount": "3" }
+// so an open app can refresh its inbox and badge without polling.
+syntax = "proto3";
+
+package communication_hub.v1;
+
+import "google/protobuf/timestamp.proto";
+import "communication_hub/v1/common.proto";
+
+service InboxService {
+  // The user's messages, newest first (expired ones excluded).
+  rpc ListInboxMessages(ListInboxMessagesRequest) returns (ListInboxMessagesResponse);
+  rpc GetUnreadCount(InboxUserRef) returns (UnreadCount);
+  // Marks the given messages read; returns the new unread count.
+  rpc MarkInboxMessagesRead(MarkInboxMessagesReadRequest) returns (UnreadCount);
+  rpc MarkAllInboxMessagesRead(InboxUserRef) returns (UnreadCount);
+  // Deletes one message of the user; returns the new unread count.
+  rpc DeleteInboxMessage(InboxMessageRef) returns (UnreadCount);
+}
+
+message InboxMessage {
+  string id = 1;
+  string user_id = 2;
+  // The notification that created it (GetNotification for delivery details).
+  string notification_id = 3;
+  optional string title = 4;
+  string body = 5;
+  // NotificationInput.metadata: deeplinks, ids, ... for the app.
+  map<string, string> metadata = 6;
+  bool read = 7;
+  google.protobuf.Timestamp read_at = 8;
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp expires_at = 10;
+}
+
+message ListInboxMessagesRequest {
+  string user_id = 1;
+  PageRequest page = 2;
+  bool unread_only = 3;
+}
+
+message ListInboxMessagesResponse {
+  repeated InboxMessage messages = 1;
+  PageInfo page = 2;
+  int32 unread_count = 3;
+}
+
+message InboxUserRef {
+  string user_id = 1;
+}
+
+message InboxMessageRef {
+  string user_id = 1;
+  string id = 2;
+}
+
+message MarkInboxMessagesReadRequest {
+  string user_id = 1;
+  // Up to 500 ids.
+  repeated string ids = 2;
+}
+
+message UnreadCount {
+  int32 unread_count = 1;
+}

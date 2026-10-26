@@ -4,7 +4,7 @@
  */
 
 import { Injectable } from '@nestjs/common';
-import { DeviceResponseDto, RegisterDeviceDto } from '../../dto/index.js';
+import { RegisterDeviceDto } from '../../dto/index.js';
 import { AppException } from '../../exceptions/index.js';
 import { DeviceToken } from '../../models/index.js';
 import { ERROR } from '../../response/response.js';
@@ -16,8 +16,8 @@ export class DeviceService {
   constructor(private readonly devices: DeviceRepository) {}
 
   /** Upserts the token for the user and returns the stored device. */
-  async register(tenantId: string, dto: RegisterDeviceDto): Promise<DeviceResponseDto> {
-    return this.toDto(await this.devices.register({ tenantId, ...dto }));
+  register(tenantId: string, dto: RegisterDeviceDto): Promise<DeviceToken> {
+    return this.devices.register({ tenantId, ...dto });
   }
 
   /** Deletes the token. Throws DEVICE_NOT_FOUND if it doesn't exist. */
@@ -28,20 +28,7 @@ export class DeviceService {
   }
 
   /** All devices of a user, newest first. */
-  async list(tenantId: string, userId: string): Promise<DeviceResponseDto[]> {
-    return (await this.devices.findByUser(tenantId, userId)).map((d) => this.toDto(d));
-  }
-
-  /** Maps an entity to the public response shape. */
-  private toDto(d: DeviceToken): DeviceResponseDto {
-    return {
-      id: d.id,
-      userId: d.userId,
-      token: d.token,
-      platform: d.platform,
-      isActive: d.isActive,
-      lastSeenAt: d.lastSeenAt,
-      createdAt: d.createdAt,
-    };
+  list(tenantId: string, userId: string): Promise<DeviceToken[]> {
+    return this.devices.findByUser(tenantId, userId);
   }
 }

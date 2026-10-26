@@ -1,0 +1,85 @@
+// Per-tenant delivery provider configuration (admin key).
+//
+// Each tenant can have several providers per channel, tried in ascending
+// `priority` order: a transient failure on one fails over to the next.
+// Workers read this configuration from Redis (falling back to Postgres) at
+// send time, so changes apply within seconds and without a deployment.
+// A tenant without providers for a channel uses the platform default
+// (EMAIL_PROVIDER / SMS_PROVIDER / PUSH_PROVIDER).
+//
+// Credentials are encrypted at rest and never returned.
+//
+//   provider   settings                              credentials
+//   smtp       host, port, secure                    user, pass
+//   ses        region                                access_key_id, secret_access_key (optional)
+//   sendgrid   -                                     api_key
+//   twilio     from | messaging_service_sid          account_sid, auth_token
+//   sns        region, sender_id                     access_key_id, secret_access_key (optional)
+//   fcm        -                                     service_account (JSON)
+//   console    -                                     -   (logs only; local development)
+syntax = "proto3";
+
+package communication_hub.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+import "communication_hub/v1/common.proto";
+
+service ProviderAdminService {
+  rpc CreateProviderConfig(CreateProviderConfigRequest) returns (ProviderConfig);
+  rpc ListProviderConfigs(ListProviderConfigsRequest) returns (ListProviderConfigsResponse);
+  // Settings are merged; credentials, when given, replace the stored ones.
+  rpc UpdateProviderConfig(UpdateProviderConfigRequest) returns (ProviderConfig);
+  rpc DeleteProviderConfig(ProviderConfigRef) returns (google.protobuf.Empty);
+}
+
+message ProviderConfig {
+  string id = 1;
+  string tenant_id = 2;
+  Channel channel = 3;
+  // smtp | ses | sendgrid | twilio | sns | fcm | console
+  string provider = 4;
+  string name = 5;
+  int32 priority = 6;
+  bool active = 7;
+  map<string, string> settings = 8;
+  // Names of the stored credentials (values are never returned).
+  repeated string credential_keys = 9;
+  google.protobuf.Timestamp created_at = 10;
+  google.protobuf.Timestamp updated_at = 11;
+}
+
+message CreateProviderConfigRequest {
+  string tenant_id = 1;
+  Channel channel = 2;
+  string provider = 3;
+  // Unique per tenant and channel, e.g. "ses-primary".
+  string name = 4;
+  int32 priority = 5;
+  map<string, string> settings = 6;
+  map<string, string> credentials = 7;
+}
+
+message ListProviderConfigsRequest {
+  string tenant_id = 1;
+  Channel channel = 2;
+}
+
+message ListProviderConfigsResponse {
+  repeated ProviderConfig providers = 1;
+}
+
+message UpdateProviderConfigRequest {
+  string tenant_id = 1;
+  string id = 2;
+  optional string name = 3;
+  optional int32 priority = 4;
+  optional bool active = 5;
+  map<string, string> settings = 6;
+  map<string, string> credentials = 7;
+}
+
+message ProviderConfigRef {
+  string tenant_id = 1;
+  string id = 2;
+}

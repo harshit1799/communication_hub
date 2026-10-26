@@ -1,124 +1,165 @@
 /**
- * /v1/notifications: HTTP layer only; logic lives in NotificationService.
- * Sends return 202 Accepted: the notification is stored and queued, and
- * its final status is available via GET /v1/notifications/:id.
+ * communication_hub.v1.NotificationService (tenant API key). Transport
+ * layer only: decodes proto messages, validates, maps results back; the
+ * logic lives in NotificationService. Sends are asynchronous: the response
+ * carries the stored notification (QUEUED); its outcome is read with
+ * GetNotification.
  */
 
-import { Body, Controller, Get, Headers, HttpCode, HttpStatus, Param, Post, Query, Req, Res } from '@nestjs/common';
-import { ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
-import type { FastifyReply, FastifyRequest } from 'fastify';
-import { HEADER } from '../../constant/index.js';
+import { Controller } from '@nestjs/common';
+import { GrpcMethod, Payload } from '@nestjs/microservices';
+import { CurrentTenant, type TenantContext } from '../../decorator/index.js';
+import { ListNotificationsDto, NotificationIdDto, SendBulkNotificationDto, SendNotificationDto } from '../../dto/index.js';
 import {
-  ApiEnvelope,
-  ApiErrors,
-  CurrentTenant,
-  ResponseMessage,
-  TenantAuth,
-  type TenantContext,
-} from '../../decorator/index.js';
-import {
-  BulkNotificationResponseDto,
-  ListNotificationsDto,
-  NotificationDetailsResponseDto,
-  NotificationIdDto,
-  NotificationListResponseDto,
-  NotificationResponseDto,
-  SendBulkNotificationDto,
-  SendNotificationDto,
-} from '../../dto/index.js';
-import { SUCCESS } from '../../response/response.js';
+  ChannelCodec,
+  compact,
+  nonEmptyMap,
+  PriorityCodec,
+  ProtoStruct,
+  ProtoTimestamp,
+  StatusCodec,
+  Struct,
+  Timestamp,
+} from '../../grpc/codecs.js';
+import { validateInput } from '../../grpc/validate.js';
+import { Notification, NotificationAttempt } from '../../models/index.js';
+import { RequestContextStore } from '../../utils/request-context.js';
 import { NotificationService } from './notification.service.js';
 
-/**
- * Tenant-authenticated notification endpoints. The request id is passed
- * to the service so worker logs can be correlated with the request.
- */
-@ApiTags('Notifications')
-@TenantAuth()
-@ApiErrors(HttpStatus.BAD_REQUEST, HttpStatus.UNAUTHORIZED, HttpStatus.TOO_MANY_REQUESTS)
-@Controller({ path: 'notifications', version: '1' })
+const SERVICE = 'NotificationService';
+
+/** NotificationInput as decoded by proto-loader. */
+interface ProtoNotificationInput {
+  channel?: string;
+  recipient?: string;
+  userId?: string;
+  subject?: string;
+  body?: string;
+  template?: string;
+  templateVersion?: number;
+  data?: ProtoStruct;
+  metadata?: Record<string, string>;
+  priority?: string;
+  scheduledAt?: ProtoTimestamp;
+  idempotencyKey?: string;
+  senderId?: string;
+  alsoPush?: boolean;
+}
+
+/** Proto input -> plain object for SendNotificationDto validation. */
+function decodeInput(input: ProtoNotificationInput = {}) {
+  return compact({
+    ...input,
+    channel: ChannelCodec.decode(input.channel),
+    priority: PriorityCodec.decode(input.priority),
+    data: Struct.decode(input.data),
+    metadata: nonEmptyMap(input.metadata),
+    scheduledAt: Timestamp.decode(input.scheduledAt),
+  });
+}
+
+/** Domain -> proto Notification. */
+export function toProtoNotification(n: Notification) {
+  return compact({
+    id: n.id,
+    channel: ChannelCodec.encode(n.channel),
+    recipient: n.recipient,
+    userId: n.userId,
+    subject: n.subject,
+    body: n.body,
+    template: n.template,
+    templateVersion: n.templateVersion,
+    data: Struct.encode(n.data),
+    metadata: n.metadata ?? {},
+    status: StatusCodec.encode(n.status),
+    priority: PriorityCodec.encode(n.priority),
+    idempotencyKey: n.idempotencyKey,
+    attempts: n.attempts ?? 0,
+    provider: n.provider,
+    providerMessageId: n.providerMessageId,
+    error: n.error,
+    senderId: n.senderId,
+    alsoPush: n.alsoPush ?? false,
+    scheduledAt: Timestamp.encode(n.scheduledAt),
+    sentAt: Timestamp.encode(n.sentAt),
+    createdAt: Timestamp.encode(n.createdAt),
+    updatedAt: Timestamp.encode(n.updatedAt),
+  });
+}
+
+const toProtoAttempt = (a: NotificationAttempt) =>
+  compact({
+    attempt: a.attempt,
+    provider: a.provider,
+    sender: a.sender,
+    success: a.success,
+    providerMessageId: a.providerMessageId,
+    error: a.error,
+    permanent: a.permanent,
+    durationMs: a.durationMs,
+    createdAt: Timestamp.encode(a.createdAt),
+  });
+
+@Controller()
 export class NotificationController {
-  constructor(private readonly notificationService: NotificationService) {}
+  constructor(private readonly notifications: NotificationService) {}
 
-  /**
-   * Accepts one notification for delivery (202). With an Idempotency-Key, a
-   * retried request returns the original notification (also 202) with the
-   * `Idempotent-Replayed: true` header, and nothing is sent again.
-   */
-  @Post()
-  @HttpCode(HttpStatus.ACCEPTED)
-  @ApiOperation({ summary: 'Send an email, SMS or push notification' })
-  @ApiHeader({
-    name: 'Idempotency-Key',
-    required: false,
-    description: 'Unique per request (e.g. a UUID). Retrying with the same key never sends twice.',
-  })
-  @ApiEnvelope(NotificationResponseDto, { status: HttpStatus.ACCEPTED })
-  @ApiErrors(HttpStatus.UNPROCESSABLE_ENTITY)
-  @ResponseMessage(SUCCESS.NOTIFICATION_ACCEPTED)
-  async send(
+  @GrpcMethod(SERVICE, 'SendNotification')
+  async send(@Payload() req: { notification?: ProtoNotificationInput }, @CurrentTenant() tenant: TenantContext) {
+    const dto = validateInput(SendNotificationDto, decodeInput(req.notification));
+    const { notification, replayed } = await this.notifications.send(tenant.tenantId, dto, this.requestId());
+    return { notification: toProtoNotification(notification), replayed };
+  }
+
+  @GrpcMethod(SERVICE, 'SendBulkNotifications')
+  async sendBulk(@Payload() req: { notifications?: ProtoNotificationInput[] }, @CurrentTenant() tenant: TenantContext) {
+    const dto = validateInput(SendBulkNotificationDto, { notifications: (req.notifications ?? []).map(decodeInput) });
+    const results = await this.notifications.sendBulk(tenant.tenantId, dto.notifications, this.requestId());
+    return {
+      accepted: results.length,
+      replayed: results.filter((r) => r.replayed).length,
+      notifications: results.map((r) => toProtoNotification(r.notification)),
+    };
+  }
+
+  @GrpcMethod(SERVICE, 'GetNotification')
+  async get(@Payload() req: { id?: string }, @CurrentTenant() tenant: TenantContext) {
+    const n = await this.notifications.findOne(tenant.tenantId, validateInput(NotificationIdDto, req).id);
+    return { notification: toProtoNotification(n), attempts: (n.attemptLog ?? []).map(toProtoAttempt) };
+  }
+
+  @GrpcMethod(SERVICE, 'ListNotifications')
+  async list(
+    @Payload() req: { page?: { limit?: number; cursor?: string }; status?: string; channel?: string; recipient?: string; userId?: string },
     @CurrentTenant() tenant: TenantContext,
-    @Body() dto: SendNotificationDto,
-    @Headers(HEADER.IDEMPOTENCY_KEY) idempotencyKey: string | undefined,
-    @Req() req: FastifyRequest,
-    @Res({ passthrough: true }) reply: FastifyReply,
   ) {
-    const { notification, replayed } = await this.notificationService.send(tenant.tenantId, dto, req.id, idempotencyKey);
-    if (replayed) reply.header(HEADER.IDEMPOTENT_REPLAYED, 'true');
-    return notification;
+    const dto = validateInput(
+      ListNotificationsDto,
+      compact({
+        limit: req.page?.limit || undefined,
+        cursor: req.page?.cursor,
+        status: StatusCodec.decode(req.status),
+        channel: ChannelCodec.decode(req.channel),
+        recipient: req.recipient,
+        userId: req.userId,
+      }),
+    );
+    const { data, nextCursor } = await this.notifications.list(tenant.tenantId, dto);
+    return { notifications: data.map(toProtoNotification), page: compact({ nextCursor }) };
   }
 
-  /** Accepts up to 500 notifications in one request (202), low priority by default. */
-  @Post('bulk')
-  @HttpCode(HttpStatus.ACCEPTED)
-  @ApiOperation({
-    summary: 'Send up to 500 notifications in one request',
-    description: 'Defaults to low priority (campaigns), so single sends are delivered first.',
-  })
-  @ApiEnvelope(BulkNotificationResponseDto, { status: HttpStatus.ACCEPTED })
-  @ResponseMessage(SUCCESS.NOTIFICATIONS_ACCEPTED)
-  sendBulk(@CurrentTenant() tenant: TenantContext, @Body() dto: SendBulkNotificationDto, @Req() req: FastifyRequest) {
-    return this.notificationService.sendBulk(tenant.tenantId, dto.notifications, req.id);
+  @GrpcMethod(SERVICE, 'RetryNotification')
+  async retry(@Payload() req: { id?: string }, @CurrentTenant() tenant: TenantContext) {
+    return toProtoNotification(await this.notifications.retry(tenant.tenantId, validateInput(NotificationIdDto, req).id, this.requestId()));
   }
 
-  /** Lists the tenant's notifications, newest first. */
-  @Get()
-  @ApiOperation({ summary: 'List notifications, newest first (cursor pagination)' })
-  @ApiEnvelope(NotificationListResponseDto)
-  @ResponseMessage(SUCCESS.NOTIFICATION_LISTING)
-  list(@CurrentTenant() tenant: TenantContext, @Query() query: ListNotificationsDto) {
-    return this.notificationService.list(tenant.tenantId, query);
+  @GrpcMethod(SERVICE, 'CancelNotification')
+  async cancel(@Payload() req: { id?: string }, @CurrentTenant() tenant: TenantContext) {
+    return toProtoNotification(await this.notifications.cancel(tenant.tenantId, validateInput(NotificationIdDto, req).id));
   }
 
-  /** One notification with its attempt log. 404 for other tenants' ids. */
-  @Get(':id')
-  @ApiOperation({ summary: 'Get a notification with its delivery attempts' })
-  @ApiEnvelope(NotificationDetailsResponseDto)
-  @ApiErrors(HttpStatus.NOT_FOUND)
-  @ResponseMessage(SUCCESS.NOTIFICATION_DETAILS)
-  findOne(@CurrentTenant() tenant: TenantContext, @Param() { id }: NotificationIdDto) {
-    return this.notificationService.findOne(tenant.tenantId, id);
-  }
-
-  /** Re-queues a failed notification. 409 if it isn't failed. */
-  @Post(':id/retry')
-  @HttpCode(HttpStatus.ACCEPTED)
-  @ApiOperation({ summary: 'Retry a failed notification' })
-  @ApiEnvelope(NotificationResponseDto, { status: HttpStatus.ACCEPTED })
-  @ApiErrors(HttpStatus.NOT_FOUND, HttpStatus.CONFLICT)
-  @ResponseMessage(SUCCESS.NOTIFICATION_RETRIED)
-  retry(@CurrentTenant() tenant: TenantContext, @Param() { id }: NotificationIdDto, @Req() req: FastifyRequest) {
-    return this.notificationService.retry(tenant.tenantId, id, req.id);
-  }
-
-  /** Cancels an undelivered notification. 409 if it already moved on. */
-  @Post(':id/cancel')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Cancel a queued, scheduled or retrying notification' })
-  @ApiEnvelope(NotificationResponseDto)
-  @ApiErrors(HttpStatus.NOT_FOUND, HttpStatus.CONFLICT)
-  @ResponseMessage(SUCCESS.NOTIFICATION_CANCELLED)
-  cancel(@CurrentTenant() tenant: TenantContext, @Param() { id }: NotificationIdDto) {
-    return this.notificationService.cancel(tenant.tenantId, id);
+  /** Carried into the job, so worker logs correlate with this call. */
+  private requestId(): string | undefined {
+    return RequestContextStore.current()?.requestId;
   }
 }

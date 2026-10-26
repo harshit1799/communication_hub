@@ -22,6 +22,10 @@ const RECIPIENT_RULES: Partial<Record<NotificationChannel, { test: (v: string) =
     test: (v) => E164_REGEX.test(v),
     message: 'recipient must be an E.164 phone number, e.g. +14155550123',
   },
+  [NotificationChannel.InApp]: {
+    test: () => false,
+    message: 'recipient is not used for CHANNEL_IN_APP; set userId',
+  },
 };
 
 /** recipient must match the channel: email address, E.164 number or token. */
@@ -45,7 +49,7 @@ export function IsRecipientForChannel(options?: ValidationOptions) {
     });
 }
 
-/** userId targets all of a user's devices: push only, and not with recipient. */
+/** userId targets a user: push (all devices, not with recipient) or in-app (inbox). */
 export function IsPushUserTarget(options?: ValidationOptions) {
   return (object: object, propertyName: string) =>
     registerDecorator({
@@ -53,13 +57,13 @@ export function IsPushUserTarget(options?: ValidationOptions) {
       target: object.constructor,
       propertyName,
       options: {
-        message: 'userId is only supported for the push channel and cannot be combined with recipient',
+        message: 'userId is only supported for push (without recipient) and in-app',
         ...options,
       },
       validator: {
         validate(_value: unknown, args: ValidationArguments) {
           const o = args.object as ChannelTarget;
-          return o.channel === NotificationChannel.Push && !o.recipient;
+          return (o.channel === NotificationChannel.Push && !o.recipient) || o.channel === NotificationChannel.InApp;
         },
       },
     });

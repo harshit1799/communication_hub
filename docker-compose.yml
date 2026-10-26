@@ -1,6 +1,17 @@
-# Local stack: Postgres, Redis, and the hub as separate API + worker
-# processes (the production topology). `docker compose up --build`
-# API: http://localhost:3000/api   Swagger: http://localhost:3000/docs
+# Local stack: Postgres, Redis, the hub as separate API + worker processes
+# (the production topology) and the monitoring stack.
+#
+#   docker compose up --build
+#
+#   gRPC API     localhost:50051          (grpcurl -plaintext localhost:50051 list)
+#   Swagger UI   http://localhost:3000/docs  (HTTP/JSON gateway to the same API)
+#   API ops      localhost:9464           (/health/live, /health/ready, /metrics)
+#   worker ops   localhost:9465
+#   Grafana      http://localhost:3001    (admin / admin; dashboard "Communication Hub")
+#   Prometheus   http://localhost:9090    (alerts: Status > Rules)
+#   Loki         queried through Grafana  (Explore > Loki)
+#
+# .env must contain ENCRYPTION_KEYS and BLIND_INDEX_KEY (see .env.example).
 
 x-hub: &hub
   build: .
@@ -9,34 +20,36 @@ x-hub: &hub
     postgres: { condition: service_healthy }
     redis: { condition: service_healthy }
   restart: unless-stopped
+  # Promtail ships logs only from containers with this label.
+  labels:
+    logging: promtail
+
+x-hub-env: &hub-env
+  NODE_ENV: production
+  APP_ENV: local
+  DB_HOST: postgres
+  DB_PASSWORD: postgres
+  REDIS_HOST: redis
+  GRPC_REFLECTION: 'true'
+  SWAGGER_ENABLED: 'true'
 
 services:
   api:
     <<: *hub
     environment:
-      NODE_ENV: development
-      APP_ENV: local
+      <<: *hub-env
       APP_ROLE: api
-      DB_HOST: postgres
-      DB_PASSWORD: postgres
-      REDIS_HOST: redis
-    ports: ['3000:3000']
+    ports: ['50051:50051', '3000:3000', '9464:9464']
 
   worker:
     <<: *hub
     environment:
-      NODE_ENV: development
-      APP_ENV: local
+      <<: *hub-env
       APP_ROLE: worker
-      DB_HOST: postgres
-      DB_PASSWORD: postgres
-      REDIS_HOST: redis
     # The API runs migrations; workers wait for it.
     depends_on:
       api: { condition: service_healthy }
-    # Workers serve no HTTP, so the image's HTTP healthcheck doesn't apply.
-    healthcheck:
-      disable: true
+    ports: ['9465:9464']
 
   postgres:
     image: postgres:17-alpine
@@ -61,6 +74,48 @@ services:
       interval: 5s
       retries: 10
 
+  # ---------- Monitoring ----------
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command: ['--config.file=/etc/prometheus/prometheus.yml', '--storage.tsdb.retention.time=15d']
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheusdata:/prometheus
+    ports: ['9090:9090']
+
+  loki:
+    image: grafana/loki:3.5.3
+    command: ['-config.file=/etc/loki/loki-config.yml']
+    volumes:
+      - ./observability/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - lokidata:/loki
+
+  promtail:
+    image: grafana/promtail:3.5.3
+    command: ['-config.file=/etc/promtail/promtail-config.yml']
+    volumes:
+      - ./observability/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on: [loki]
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    ports: ['3001:3000']
+    depends_on: [prometheus, loki]
+
 volumes:
   pgdata:
   redisdata:
+  prometheusdata:
+  lokidata:
+  grafanadata:

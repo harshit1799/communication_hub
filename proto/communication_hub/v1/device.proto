@@ -1,0 +1,51 @@
+// Push token registry (tenant API key).
+syntax = "proto3";
+
+package communication_hub.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+service DeviceService {
+  // Registers or refreshes a token (call on every app start / login).
+  rpc RegisterDevice(RegisterDeviceRequest) returns (Device);
+  // Every device of a user, including deactivated ones.
+  rpc ListDevices(ListDevicesRequest) returns (ListDevicesResponse);
+  // NOT_FOUND if this tenant doesn't have the token.
+  rpc UnregisterDevice(UnregisterDeviceRequest) returns (google.protobuf.Empty);
+}
+
+enum DevicePlatform {
+  DEVICE_PLATFORM_UNSPECIFIED = 0;
+  DEVICE_PLATFORM_IOS = 1;
+  DEVICE_PLATFORM_ANDROID = 2;
+  DEVICE_PLATFORM_WEB = 3;
+}
+
+message Device {
+  string id = 1;
+  string user_id = 2;
+  string token = 3;
+  DevicePlatform platform = 4;
+  bool active = 5;
+  google.protobuf.Timestamp last_seen_at = 6;
+  google.protobuf.Timestamp created_at = 7;
+}
+
+message RegisterDeviceRequest {
+  string user_id = 1;
+  string token = 2;
+  DevicePlatform platform = 3;
+}
+
+message ListDevicesRequest {
+  string user_id = 1;
+}
+
+message ListDevicesResponse {
+  repeated Device devices = 1;
+}
+
+message UnregisterDeviceRequest {
+  string token = 1;
+}

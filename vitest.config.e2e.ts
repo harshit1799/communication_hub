@@ -18,7 +18,7 @@ export default defineConfig({
     root: './',
     // E2E tests are files ending in .e2e-spec.ts.
     include: ['**/*.e2e-spec.ts'],
-    // The app boots once per file; give migrations and Redis time.
+    // The app boots once per file (gRPC server + workers); give migrations and Redis time.
     hookTimeout: 30_000,
     testTimeout: 30_000,
     // Each file boots the app with live workers on the same Redis/DB;
@@ -39,6 +39,17 @@ export default defineConfig({
       QUEUE_BACKOFF_MS: '100',
       THROTTLE_LIMIT: '10000',
       LOG_LEVEL: 'silent',
+      // Fixed test-only keys (never use these anywhere else).
+      ENCRYPTION_KEYS: 'e2e:ZTJlLXRlc3QtZW5jcnlwdGlvbi1rZXktMzJieXRlcyE=',
+      ENCRYPTION_ACTIVE_KEY: 'e2e',
+      BLIND_INDEX_KEY: 'ZTJlLXRlc3QtYmxpbmQtaW5kZXgta2V5LTMyLWJ5dGVzIQ==',
+      // Each test file picks a free gRPC port; no ops HTTP server in tests.
+      OPS_PORT: '0',
+      // The gateway e2e test starts its own gateway against the test server.
+      HTTP_PORT: '0',
+      GRPC_REFLECTION: 'false',
+      // Short caches so tests that bypass the API see changes quickly.
+      PROVIDER_CACHE_TTL_SECONDS: '5',
     },
   },
 });

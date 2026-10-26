@@ -31,12 +31,13 @@ export class QueueConnectionLogger implements OnApplicationBootstrap {
     @InjectQueue(CHANNEL_QUEUE.email) email: Queue,
     @InjectQueue(CHANNEL_QUEUE.sms) sms: Queue,
     @InjectQueue(CHANNEL_QUEUE.push) push: Queue,
+    @InjectQueue(CHANNEL_QUEUE.in_app) inApp: Queue,
     @InjectQueue(MAINTENANCE_QUEUE) maintenance: Queue,
     config: ConfigService,
   ) {
     const { redis } = config.getOrThrow<AppConfig>('app');
     this.target = `${redis.host}:${redis.port}${redis.cluster ? ' (cluster)' : `/${redis.db}`}`;
-    this.queues = [email, sms, push, maintenance];
+    this.queues = [email, sms, push, inApp, maintenance];
     for (const queue of this.queues) {
       const state = new ConnectionState(this.logger, `Queue "${queue.name}"`);
       queue.on('error', (err) => state.error(err));

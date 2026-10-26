@@ -17,10 +17,15 @@ WORKDIR /app
 COPY --from=build --chown=node:node /app/package.json ./
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
+# The gRPC contract, loaded at runtime (dist/grpc -> ../../proto).
+COPY --chown=node:node proto ./proto
 USER node
-EXPOSE 3000
-# Liveness only (no dependencies); point the readiness probe at /api/health/ready.
+# 50051: gRPC API, 3000: HTTP/JSON gateway + Swagger (api role).
+# 9464: health + Prometheus metrics (every role).
+EXPOSE 50051 3000 9464
+# Liveness only (no dependencies); point the readiness probe at
+# http://<pod>:9464/health/ready (or a gRPC probe on 50051).
 HEALTHCHECK --interval=30s --timeout=3s --start-period=20s \
-  CMD wget -qO- http://127.0.0.1:${PORT:-3000}/api/health >/dev/null || exit 1
+  CMD wget -qO- http://127.0.0.1:${OPS_PORT:-9464}/health/live >/dev/null || exit 1
 # exec form: node is PID 1 and receives SIGTERM for graceful shutdown.
 CMD ["node", "dist/main"]

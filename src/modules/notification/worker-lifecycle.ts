@@ -24,7 +24,7 @@ import { ConfigService } from '@nestjs/config';
 import { AppConfig } from '../../config/configuration.js';
 import { AppRole } from '../../constant/index.js';
 import { MaintenanceProcessor } from './maintenance.processor.js';
-import { EmailProcessor, PushProcessor, SmsProcessor } from './notification.processor.js';
+import { EmailProcessor, InAppProcessor, PushProcessor, SmsProcessor } from './notification.processor.js';
 
 // Below main.ts's 25s shutdown deadline, leaving time to close connections.
 const GRACEFUL_CLOSE_MS = 15_000;
@@ -38,6 +38,7 @@ export class WorkerLifecycle implements OnApplicationBootstrap, BeforeApplicatio
     private readonly email: EmailProcessor,
     private readonly sms: SmsProcessor,
     private readonly push: PushProcessor,
+    private readonly inApp: InAppProcessor,
     private readonly maintenance: MaintenanceProcessor,
     config: ConfigService,
   ) {
@@ -45,7 +46,7 @@ export class WorkerLifecycle implements OnApplicationBootstrap, BeforeApplicatio
   }
 
   private get hosts() {
-    return [this.email, this.sms, this.push, this.maintenance];
+    return [this.email, this.sms, this.push, this.inApp, this.maintenance];
   }
 
   /** Starts the workers in worker/all roles; releases them in the api role. */
@@ -59,6 +60,7 @@ export class WorkerLifecycle implements OnApplicationBootstrap, BeforeApplicatio
     this.email.start(workers.email);
     this.sms.start(workers.sms);
     this.push.start(workers.push);
+    this.inApp.start(workers.in_app);
     this.maintenance.start();
   }
 

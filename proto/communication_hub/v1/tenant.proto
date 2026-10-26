@@ -1,0 +1,96 @@
+// Tenants and their API keys (admin key).
+syntax = "proto3";
+
+package communication_hub.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+service TenantAdminService {
+  // Creates a tenant, its first API key and the starter templates.
+  rpc CreateTenant(CreateTenantRequest) returns (CreateTenantResponse);
+  rpc GetTenant(TenantRef) returns (Tenant);
+  rpc ListTenants(google.protobuf.Empty) returns (ListTenantsResponse);
+  // Takes effect immediately (cached credentials are dropped).
+  rpc UpdateTenant(UpdateTenantRequest) returns (Tenant);
+
+  rpc CreateApiKey(CreateApiKeyRequest) returns (CreatedApiKey);
+  rpc ListApiKeys(TenantRef) returns (ListApiKeysResponse);
+  // Idempotent; requests with the key fail immediately.
+  rpc RevokeApiKey(RevokeApiKeyRequest) returns (google.protobuf.Empty);
+}
+
+message TenantSettings {
+  // Brand name available to templates as {{appName}}.
+  optional string app_name = 1;
+}
+
+message Tenant {
+  string id = 1;
+  string name = 2;
+  string slug = 3;
+  bool active = 4;
+  TenantSettings settings = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp updated_at = 7;
+}
+
+message CreateTenantRequest {
+  string name = 1;
+  // 3-100 lowercase letters, digits or dashes; unique.
+  string slug = 2;
+  TenantSettings settings = 3;
+}
+
+message CreateTenantResponse {
+  Tenant tenant = 1;
+  CreatedApiKey api_key = 2;
+}
+
+message TenantRef {
+  string id = 1;
+}
+
+message ListTenantsResponse {
+  repeated Tenant tenants = 1;
+}
+
+message UpdateTenantRequest {
+  string id = 1;
+  optional string name = 2;
+  optional bool active = 3;
+  // Merged into the stored settings.
+  TenantSettings settings = 4;
+}
+
+message ApiKey {
+  string id = 1;
+  string name = 2;
+  // First characters of the key, e.g. "chk_a1b2c3d4".
+  string prefix = 3;
+  google.protobuf.Timestamp last_used_at = 4;
+  google.protobuf.Timestamp expires_at = 5;
+  google.protobuf.Timestamp revoked_at = 6;
+  google.protobuf.Timestamp created_at = 7;
+}
+
+// The only message that ever contains the key itself.
+message CreatedApiKey {
+  ApiKey api_key = 1;
+  string key = 2;
+}
+
+message CreateApiKeyRequest {
+  string tenant_id = 1;
+  string name = 2;
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+message ListApiKeysResponse {
+  repeated ApiKey api_keys = 1;
+}
+
+message RevokeApiKeyRequest {
+  string tenant_id = 1;
+  string key_id = 2;
+}

@@ -10,6 +10,7 @@
 import 'reflect-metadata';
 import { DataSource } from 'typeorm';
 import { environment } from '../../config/environment.js';
+import { configureFieldCipher } from '../../utils/crypto/crypto.module.js';
 import { buildDataSourceOptions } from './postgres.options.js';
 
 // Nest's ConfigModule reads .env for the app; the CLI has to do it itself.
@@ -21,5 +22,7 @@ try {
 
 // Same loader as the app: Secrets Manager outside APP_ENV=local, validation.
 const { app } = await environment();
+// Encrypted columns (TypeORM transformers) need the cipher outside Nest too.
+configureFieldCipher(app.crypto);
 
 export default new DataSource(buildDataSourceOptions(app.database));

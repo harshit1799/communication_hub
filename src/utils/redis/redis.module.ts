@@ -1,5 +1,6 @@
 /**
- * Global Redis module: one shared client for caching and rate limiting.
+ * Global Redis module: one shared client for caching (API keys, providers,
+ * senders, templates) and rate limiting.
  * (BullMQ opens its own connections, see utils/queue.)
  */
 
@@ -7,7 +8,7 @@ import { Global, Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppConfig } from '../../config/configuration.js';
 import { createRedisConnection } from './redis.connection.js';
-import { RedisThrottlerStorage } from './redis-throttler.storage.js';
+import { RedisRateLimiter } from './redis-rate-limiter.js';
 import { REDIS_CLIENT, RedisService } from './redis.service.js';
 
 /** Global so any module can inject RedisService without importing this. */
@@ -25,8 +26,8 @@ import { REDIS_CLIENT, RedisService } from './redis.service.js';
         }),
     },
     RedisService,
-    RedisThrottlerStorage,
+    RedisRateLimiter,
   ],
-  exports: [RedisService, RedisThrottlerStorage],
+  exports: [RedisService, RedisRateLimiter],
 })
 export class RedisModule {}

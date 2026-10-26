@@ -1,6 +1,4 @@
-/** Re-exports every custom decorator (auth, tenant, response, Swagger helpers). */
+/** Re-exports every custom decorator (access levels, current tenant). */
 
-export * from './api-envelope.decorator.js';
 export * from './auth.decorator.js';
-export * from './response.decorator.js';
 export * from './tenant.decorator.js';

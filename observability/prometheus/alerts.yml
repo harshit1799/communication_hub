@@ -1,0 +1,97 @@
+# Alert rules for the Communication Hub. Visible in Prometheus (Alerts tab)
+# and Grafana; wire an Alertmanager to route them (Slack, PagerDuty, ...).
+#
+# Queue gauges are reported by every process (api and worker read the same
+# Redis), so queue rules use max() to avoid double counting.
+groups:
+  - name: communication-hub.delivery
+    rules:
+      - alert: HubDeliveryFailureRatioHigh
+        expr: |
+          sum by (channel) (rate(chub_notifications_finished_total{status="failed"}[15m]))
+            /
+          sum by (channel) (rate(chub_notifications_finished_total[15m])) > 0.05
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: 'More than 5% of {{ $labels.channel }} notifications fail'
+          description: 'Check provider errors in Loki: {compose_service="worker"} | json | event="delivery_failed" | channel="{{ $labels.channel }}"'
+
+      - alert: HubProviderFailingOver
+        expr: sum by (channel, from_provider) (rate(chub_provider_failovers_total[5m])) > 0.1
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: '{{ $labels.from_provider }} ({{ $labels.channel }}) keeps failing; traffic is going to backup providers'
+
+      - alert: HubRetriesHigh
+        expr: sum by (channel) (rate(chub_delivery_retries_total[5m])) > 1
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: 'Sustained retries on {{ $labels.channel }} (all providers failing transiently?)'
+
+      - alert: HubDeliverySlow
+        expr: |
+          histogram_quantile(0.95, sum by (le, channel, provider) (rate(chub_delivery_duration_seconds_bucket[10m]))) > 10
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: 'p95 provider latency above 10s for {{ $labels.provider }} ({{ $labels.channel }})'
+
+      - alert: HubInboxSignalsFailing
+        expr: |
+          sum(rate(chub_inbox_signals_total{outcome="failed"}[15m]))
+            /
+          clamp_min(sum(rate(chub_inbox_signals_total[15m])), 1e-9) > 0.2
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: 'Over 20% of in-app device signals fail (messages are still in the inbox; apps update on next sync)'
+
+  - name: communication-hub.queues
+    rules:
+      - alert: HubQueueBacklog
+        expr: max by (queue) (chub_queue_jobs{state="waiting"}) > 1000
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: 'Queue {{ $labels.queue }} has {{ $value }} waiting jobs: scale workers (APP_ROLE=worker) or check rate limits'
+
+      - alert: HubQueueFailedJobsGrowing
+        expr: delta(max by (queue) (chub_queue_jobs{state="failed"})[30m:1m]) > 100
+        labels: { severity: warning }
+        annotations:
+          summary: '{{ $value }} jobs failed in {{ $labels.queue }} in the last 30 minutes'
+
+      - alert: HubSweeperRequeuing
+        expr: sum(increase(chub_sweeper_requeued_total[15m])) > 50
+        labels: { severity: warning }
+        annotations:
+          summary: 'The sweeper re-enqueued {{ $value }} stuck notifications (Redis instability or crashed workers?)'
+
+  - name: communication-hub.service
+    rules:
+      - alert: HubTargetDown
+        expr: up{job=~"communication-hub-.*"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: '{{ $labels.job }} {{ $labels.instance }} is not reachable'
+
+      - alert: HubNoWorkers
+        expr: sum(up{job="communication-hub-worker"}) == 0 or absent(up{job="communication-hub-worker"})
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: 'No queue worker is running: notifications are accepted but not delivered'
+
+      - alert: HubGrpcServerErrors
+        expr: |
+          sum(rate(chub_grpc_requests_total{code=~"INTERNAL|UNAVAILABLE|UNKNOWN|DATA_LOSS"}[5m]))
+            /
+          sum(rate(chub_grpc_requests_total[5m])) > 0.02
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: 'More than 2% of gRPC calls fail server-side'

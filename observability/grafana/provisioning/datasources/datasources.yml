@@ -1,0 +1,22 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    jsonData:
+      # Click a requestId in a log line to see every line of that request.
+      derivedFields:
+        - name: requestId
+          matcherRegex: '"requestId":"([^"]+)"'
+          datasourceUid: loki
+          url: '{compose_service=~"api|worker"} | json | requestId="$${__value.raw}"'

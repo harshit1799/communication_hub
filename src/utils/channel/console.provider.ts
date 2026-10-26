@@ -5,6 +5,7 @@
 
 import { Logger } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
+import { maskRecipient } from '../crypto/recipient.js';
 import {
   DeliveryResult,
   EmailMessage,
@@ -31,14 +32,18 @@ export class ConsoleProvider implements EmailProvider, SmsProvider, PushProvider
 
   /** Logs the message and returns a fake "console-<uuid>" message id. */
   send(message: EmailMessage | SmsMessage | PushMessage): Promise<DeliveryResult> {
-    const target = 'tokens' in message ? message.tokens.join(',') : message.to;
+    // Recipients are personal data: masked even in development logs.
+    const target = ('tokens' in message ? message.tokens : [message.to]).map(maskRecipient).join(',');
+    const from = 'from' in message && message.from ? ` (from ${message.from})` : '';
     const content =
       'subject' in message
         ? `${message.subject} | ${message.text ?? `[html ${message.html?.length ?? 0} chars]`}`
-        : 'title' in message && message.title
+        : 'silent' in message && message.silent
+          ? `[silent data ${JSON.stringify(message.data ?? {})}]`
+          : 'title' in message && message.title
           ? `${message.title} | ${message.body}`
           : message.body;
-    this.logger.log(`-> ${target}: ${content}`);
+    this.logger.log(`-> ${target}${from}: ${content}`);
     return Promise.resolve({ provider: this.name, providerMessageId: `console-${randomUUID()}` });
   }
 }

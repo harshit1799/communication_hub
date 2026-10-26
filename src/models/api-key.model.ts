@@ -16,6 +16,7 @@ import {
   PrimaryGeneratedColumn,
   Unique,
 } from 'typeorm';
+import type { Relation } from 'typeorm';
 import { Tenant } from './tenant.model.js';
 
 /** One API key of a tenant. Valid while not revoked and not expired. */
@@ -34,7 +35,7 @@ export class ApiKey {
     name: 'tenant_id',
     foreignKeyConstraintName: 'fk_api_keys_tenant',
   })
-  tenant?: Tenant;
+  tenant?: Relation<Tenant>;
 
   // Label to tell keys apart, e.g. "production backend".
   @Column({ type: 'varchar', length: 100 })

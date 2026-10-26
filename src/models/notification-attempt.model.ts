@@ -12,9 +12,13 @@ import {
   ManyToOne,
   PrimaryGeneratedColumn,
 } from 'typeorm';
+import type { Relation } from 'typeorm';
 import { Notification } from './notification.model.js';
 
-/** One delivery attempt of a notification (append-only). */
+/**
+ * One delivery attempt of a notification (append-only). With provider
+ * failover, one attempt number has a row per provider tried.
+ */
 @Entity('notification_attempts')
 @Index('idx_notification_attempts_notification', ['notificationId'])
 export class NotificationAttempt {
@@ -31,7 +35,7 @@ export class NotificationAttempt {
     name: 'notification_id',
     foreignKeyConstraintName: 'fk_notification_attempts_notification',
   })
-  notification?: Notification;
+  notification?: Relation<Notification>;
 
   // 1-based attempt number.
   @Column({ type: 'int' })
@@ -39,6 +43,10 @@ export class NotificationAttempt {
 
   @Column({ type: 'varchar', length: 30 })
   provider: string;
+
+  // Sender used (email "From" / SMS sender id), null when none applied.
+  @Column({ type: 'varchar', length: 255, nullable: true })
+  sender: string | null;
 
   @Column({ type: 'boolean' })
   success: boolean;

@@ -1,99 +1,85 @@
 /**
- * Admin API for tenants and their API keys. Requires the x-admin-key header.
+ * communication_hub.v1.TenantAdminService (admin key): tenants and their
+ * API keys.
  */
 
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Patch, Post } from '@nestjs/common';
-import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { AdminOnly, ApiEnvelope, ApiErrors, ResponseMessage } from '../../decorator/index.js';
-import {
-  ApiKeyParamsDto,
-  ApiKeyResponseDto,
-  CreateApiKeyDto,
-  CreatedApiKeyResponseDto,
-  CreatedTenantResponseDto,
-  CreateTenantDto,
-  TenantIdDto,
-  TenantResponseDto,
-  UpdateTenantDto,
-} from '../../dto/index.js';
-import { SUCCESS } from '../../response/response.js';
-import { TenantService } from './tenant.service.js';
+import { Controller } from '@nestjs/common';
+import { GrpcMethod, Payload } from '@nestjs/microservices';
+import { AdminOnly } from '../../decorator/index.js';
+import { CreateApiKeyDto, CreateTenantDto, RevokeApiKeyDto, TenantIdDto, UpdateTenantDto } from '../../dto/index.js';
+import { compact, ProtoTimestamp, Timestamp } from '../../grpc/codecs.js';
+import { validateInput } from '../../grpc/validate.js';
+import { ApiKey, Tenant } from '../../models/index.js';
+import { IssuedKey, TenantService } from './tenant.service.js';
 
-/** Admin-only endpoints (x-admin-key) for tenants and API keys. */
-@ApiTags('Admin: Tenants')
+const SERVICE = 'TenantAdminService';
+
+const toProtoTenant = (t: Tenant) => ({
+  id: t.id,
+  name: t.name,
+  slug: t.slug,
+  active: t.isActive,
+  settings: compact({ appName: t.settings?.appName }),
+  createdAt: Timestamp.encode(t.createdAt),
+  updatedAt: Timestamp.encode(t.updatedAt),
+});
+
+/** Never exposes the key hash. */
+const toProtoKey = (k: ApiKey) =>
+  compact({
+    id: k.id,
+    name: k.name,
+    prefix: k.prefix,
+    lastUsedAt: Timestamp.encode(k.lastUsedAt),
+    expiresAt: Timestamp.encode(k.expiresAt),
+    revokedAt: Timestamp.encode(k.revokedAt),
+    createdAt: Timestamp.encode(k.createdAt),
+  });
+
+const toProtoIssued = ({ apiKey, key }: IssuedKey) => ({ apiKey: toProtoKey(apiKey), key });
+
 @AdminOnly()
-@ApiErrors(HttpStatus.BAD_REQUEST, HttpStatus.UNAUTHORIZED, HttpStatus.FORBIDDEN)
-@Controller({ path: 'admin/tenants', version: '1' })
+@Controller()
 export class TenantController {
-  constructor(private readonly tenantService: TenantService) {}
+  constructor(private readonly tenants: TenantService) {}
 
-  /** Creates a tenant. The response contains its first API key. */
-  @Post()
-  @ApiOperation({ summary: 'Create a tenant and its first API key' })
-  @ApiEnvelope(CreatedTenantResponseDto, { status: HttpStatus.CREATED })
-  @ApiErrors(HttpStatus.CONFLICT)
-  @ResponseMessage(SUCCESS.TENANT_CREATED)
-  create(@Body() dto: CreateTenantDto) {
-    return this.tenantService.create(dto);
+  @GrpcMethod(SERVICE, 'CreateTenant')
+  async create(@Payload() req: { name?: string; slug?: string; settings?: { appName?: string } }) {
+    const { tenant, apiKey } = await this.tenants.create(validateInput(CreateTenantDto, compact(req)));
+    return { tenant: toProtoTenant(tenant), apiKey: toProtoIssued(apiKey) };
   }
 
-  /** Lists all tenants, newest first. */
-  @Get()
-  @ApiOperation({ summary: 'List tenants' })
-  @ApiEnvelope(TenantResponseDto, { isArray: true })
-  @ResponseMessage(SUCCESS.TENANT_LISTING)
-  findAll() {
-    return this.tenantService.findAll();
+  @GrpcMethod(SERVICE, 'GetTenant')
+  async get(@Payload() req: { id?: string }) {
+    return toProtoTenant(await this.tenants.findOne(validateInput(TenantIdDto, req).id));
   }
 
-  /** Gets one tenant. */
-  @Get(':id')
-  @ApiOperation({ summary: 'Get a tenant' })
-  @ApiEnvelope(TenantResponseDto)
-  @ApiErrors(HttpStatus.NOT_FOUND)
-  @ResponseMessage(SUCCESS.TENANT_DETAILS)
-  findOne(@Param() { id }: TenantIdDto) {
-    return this.tenantService.findOne(id);
+  @GrpcMethod(SERVICE, 'ListTenants')
+  async list() {
+    return { tenants: (await this.tenants.findAll()).map(toProtoTenant) };
   }
 
-  /** Updates a tenant. Takes effect immediately (cached keys are dropped). */
-  @Patch(':id')
-  @ApiOperation({ summary: 'Update name, settings or active status' })
-  @ApiEnvelope(TenantResponseDto)
-  @ApiErrors(HttpStatus.NOT_FOUND)
-  @ResponseMessage(SUCCESS.TENANT_UPDATED)
-  update(@Param() { id }: TenantIdDto, @Body() dto: UpdateTenantDto) {
-    return this.tenantService.update(id, dto);
+  @GrpcMethod(SERVICE, 'UpdateTenant')
+  async update(@Payload() req: { id?: string; name?: string; active?: boolean; settings?: { appName?: string } }) {
+    const dto = validateInput(UpdateTenantDto, compact({ id: req.id, name: req.name, isActive: req.active, settings: req.settings }));
+    return toProtoTenant(await this.tenants.update(dto));
   }
 
-  /** Issues an extra key, e.g. to rotate keys without downtime. */
-  @Post(':id/api-keys')
-  @ApiOperation({ summary: 'Issue an additional API key (for rotation)' })
-  @ApiEnvelope(CreatedApiKeyResponseDto, { status: HttpStatus.CREATED })
-  @ApiErrors(HttpStatus.NOT_FOUND)
-  @ResponseMessage(SUCCESS.API_KEY_CREATED)
-  createApiKey(@Param() { id }: TenantIdDto, @Body() dto: CreateApiKeyDto) {
-    return this.tenantService.createApiKey(id, dto);
+  @GrpcMethod(SERVICE, 'CreateApiKey')
+  async createApiKey(@Payload() req: { tenantId?: string; name?: string; expiresAt?: ProtoTimestamp }) {
+    const dto = validateInput(CreateApiKeyDto, compact({ ...req, expiresAt: Timestamp.decode(req.expiresAt) }));
+    return toProtoIssued(await this.tenants.createApiKey(dto));
   }
 
-  /** Lists key metadata. */
-  @Get(':id/api-keys')
-  @ApiOperation({ summary: "List a tenant's API keys (never returns the key itself)" })
-  @ApiEnvelope(ApiKeyResponseDto, { isArray: true })
-  @ApiErrors(HttpStatus.NOT_FOUND)
-  @ResponseMessage(SUCCESS.API_KEY_LISTING)
-  listApiKeys(@Param() { id }: TenantIdDto) {
-    return this.tenantService.listApiKeys(id);
+  @GrpcMethod(SERVICE, 'ListApiKeys')
+  async listApiKeys(@Payload() req: { id?: string }) {
+    return { apiKeys: (await this.tenants.listApiKeys(validateInput(TenantIdDto, req).id)).map(toProtoKey) };
   }
 
-  /** Revokes a key. Idempotent; requests with it fail immediately. */
-  @Delete(':id/api-keys/:keyId')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Revoke an API key (effective immediately)' })
-  @ApiErrors(HttpStatus.NOT_FOUND)
-  @ResponseMessage(SUCCESS.API_KEY_REVOKED)
-  async revokeApiKey(@Param() { id, keyId }: ApiKeyParamsDto) {
-    await this.tenantService.revokeApiKey(id, keyId);
+  @GrpcMethod(SERVICE, 'RevokeApiKey')
+  async revokeApiKey(@Payload() req: { tenantId?: string; keyId?: string }) {
+    const { tenantId, keyId } = validateInput(RevokeApiKeyDto, req);
+    await this.tenants.revokeApiKey(tenantId, keyId);
     return {};
   }
 }

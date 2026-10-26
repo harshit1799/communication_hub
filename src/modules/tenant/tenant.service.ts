@@ -3,23 +3,23 @@
  */
 
 import { Injectable } from '@nestjs/common';
-import {
-  ApiKeyResponseDto,
-  CreateApiKeyDto,
-  CreatedApiKeyResponseDto,
-  CreatedTenantResponseDto,
-  CreateTenantDto,
-  UpdateTenantDto,
-} from '../../dto/index.js';
+import { CreateApiKeyDto, CreateTenantDto, UpdateTenantDto } from '../../dto/index.js';
 import { AppException } from '../../exceptions/index.js';
 import { ApiKey, Tenant } from '../../models/index.js';
 import { ERROR } from '../../response/response.js';
+import { TemplateService } from '../template/template.service.js';
 import { ApiKeyRepository } from './api-key.repository.js';
 import { ApiKeyService } from './api-key.service.js';
 import { TenantRepository } from './tenant.repository.js';
 
 /** Postgres error code for unique constraint violations (unique_violation). */
 const UNIQUE_VIOLATION = '23505';
+
+/** A newly issued key: the only time the raw key is returned. */
+export interface IssuedKey {
+  apiKey: ApiKey;
+  key: string;
+}
 
 /** Used by the admin controller and by BootstrapService. */
 @Injectable()
@@ -28,25 +28,31 @@ export class TenantService {
     private readonly tenants: TenantRepository,
     private readonly apiKeyRepository: ApiKeyRepository,
     private readonly apiKeys: ApiKeyService,
+    private readonly templates: TemplateService,
   ) {}
 
   /**
-   * Creates a tenant together with its first ("default") key. `rawKey` lets the
-   * bootstrap use a known key; normally a random one is generated.
-   * Throws TENANT_SLUG_TAKEN if the slug exists.
+   * Creates a tenant with the starter templates (one transaction) and its
+   * first ("default") key. `rawKey` lets the bootstrap use a known key;
+   * normally a random one is generated. Throws TENANT_SLUG_TAKEN.
    */
-  async create(dto: CreateTenantDto, rawKey?: string): Promise<CreatedTenantResponseDto> {
+  async create(dto: CreateTenantDto, rawKey?: string): Promise<{ tenant: Tenant; apiKey: IssuedKey }> {
     let tenant: Tenant;
     try {
-      tenant = await this.tenants.createTenant(dto);
+      tenant = await this.tenants.transaction(async (manager) => {
+        const created = await manager.getRepository(Tenant).save(
+          manager.getRepository(Tenant).create({ name: dto.name, slug: dto.slug, settings: { ...dto.settings } }),
+        );
+        await this.templates.seedStarterTemplates(created.id, manager);
+        return created;
+      });
     } catch (err) {
       if ((err as { code?: string }).code === UNIQUE_VIOLATION) {
         throw new AppException(ERROR.TENANT_SLUG_TAKEN);
       }
       throw err;
     }
-    const { apiKey, key } = await this.apiKeys.issue(tenant.id, 'default', undefined, rawKey);
-    return { tenant, apiKey: { ...this.toKeyDto(apiKey), key } };
+    return { tenant, apiKey: await this.apiKeys.issue(tenant.id, 'default', undefined, rawKey) };
   }
 
   /** All tenants, newest first. */
@@ -70,7 +76,8 @@ export class TenantService {
    * Applies the changes and invalidates the tenant's cached keys, so a
    * deactivation or new branding applies to the very next request.
    */
-  async update(id: string, dto: UpdateTenantDto): Promise<Tenant> {
+  async update(dto: UpdateTenantDto): Promise<Tenant> {
+    const id = dto.id;
     const tenant = await this.findOne(id);
     if (dto.name !== undefined) tenant.name = dto.name;
     if (dto.isActive !== undefined) tenant.isActive = dto.isActive;
@@ -82,17 +89,15 @@ export class TenantService {
   }
 
   /** Issues a new key for an existing tenant. */
-  async createApiKey(tenantId: string, dto: CreateApiKeyDto): Promise<CreatedApiKeyResponseDto> {
-    await this.findOne(tenantId);
-    const expiresAt = dto.expiresAt ? new Date(dto.expiresAt) : undefined;
-    const { apiKey, key } = await this.apiKeys.issue(tenantId, dto.name, expiresAt);
-    return { ...this.toKeyDto(apiKey), key };
+  async createApiKey(dto: CreateApiKeyDto): Promise<IssuedKey> {
+    await this.findOne(dto.tenantId);
+    return this.apiKeys.issue(dto.tenantId, dto.name, dto.expiresAt);
   }
 
   /** Metadata of all keys of a tenant (including revoked ones). */
-  async listApiKeys(tenantId: string): Promise<ApiKeyResponseDto[]> {
+  async listApiKeys(tenantId: string): Promise<ApiKey[]> {
     await this.findOne(tenantId);
-    return (await this.apiKeyRepository.findByTenant(tenantId)).map((k) => this.toKeyDto(k));
+    return this.apiKeyRepository.findByTenant(tenantId);
   }
 
   /** Revokes a key; revoking an already revoked key is a no-op. */
@@ -100,18 +105,5 @@ export class TenantService {
     const apiKey = await this.apiKeyRepository.findForTenant(tenantId, keyId);
     if (!apiKey) throw new AppException(ERROR.API_KEY_NOT_FOUND);
     if (!apiKey.revokedAt) await this.apiKeys.revoke(apiKey);
-  }
-
-  /** Never exposes the key hash. */
-  private toKeyDto(k: ApiKey): ApiKeyResponseDto {
-    return {
-      id: k.id,
-      name: k.name,
-      prefix: k.prefix,
-      lastUsedAt: k.lastUsedAt,
-      expiresAt: k.expiresAt,
-      revokedAt: k.revokedAt,
-      createdAt: k.createdAt,
-    };
   }
 }

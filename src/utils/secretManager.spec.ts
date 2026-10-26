@@ -76,10 +76,18 @@ describe('fetchSecrets', () => {
 });
 
 describe('validateEnv for deployed environments', () => {
-  const base = { DB_PASSWORD: 'x' };
+  const base = {
+    DB_PASSWORD: 'x',
+    ENCRYPTION_KEYS: `k1:${Buffer.alloc(32, 1).toString('base64')}`,
+    BLIND_INDEX_KEY: Buffer.alloc(32, 2).toString('base64'),
+  };
 
   it('accepts a minimal local configuration', () => {
     expect(() => validateEnv({ ...base, APP_ENV: 'local' })).not.toThrow();
+  });
+
+  it('requires encryption keys in every environment', () => {
+    expect(() => validateEnv({ DB_PASSWORD: 'x', APP_ENV: 'local' })).toThrow(/ENCRYPTION_KEYS[\s\S]*BLIND_INDEX_KEY/);
   });
 
   it('requires ADMIN_API_KEY and real providers outside local', () => {

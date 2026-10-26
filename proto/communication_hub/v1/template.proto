@@ -1,0 +1,110 @@
+// Message templates stored in the hub, versioned (tenant API key).
+//
+// A template is identified by (channel, name). Its content lives in
+// immutable versions; exactly one version is active and used by sends that
+// don't pin template_version. Publishing a new version or rolling back is
+// a single call, no deployment. Notifications record the version they were
+// accepted with, so retries always render the same content.
+syntax = "proto3";
+
+package communication_hub.v1;
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+import "communication_hub/v1/common.proto";
+
+service TemplateService {
+  // Creates a template and its version 1 (active).
+  rpc CreateTemplate(CreateTemplateRequest) returns (Template);
+  rpc GetTemplate(TemplateRef) returns (Template);
+  rpc ListTemplates(ListTemplatesRequest) returns (ListTemplatesResponse);
+  // Adds version N+1; activates it when `activate` is true.
+  rpc CreateTemplateVersion(CreateTemplateVersionRequest) returns (TemplateVersion);
+  rpc ListTemplateVersions(TemplateRef) returns (ListTemplateVersionsResponse);
+  // Makes an existing version active (publish or roll back).
+  rpc ActivateTemplateVersion(ActivateTemplateVersionRequest) returns (Template);
+  // Archived templates can no longer be used for new sends.
+  rpc ArchiveTemplate(TemplateRef) returns (Template);
+  // Renders a version with sample data, without sending anything.
+  rpc PreviewTemplate(PreviewTemplateRequest) returns (RenderedTemplate);
+}
+
+// Handlebars content. email: subject + html and/or body (text part).
+// sms / push: body (push uses subject as the title).
+message TemplateContent {
+  optional string subject = 1;
+  optional string body = 2;
+  optional string html = 3;
+}
+
+message CreateTemplateRequest {
+  Channel channel = 1;
+  // Lowercase letters, digits and dashes, e.g. "password-reset".
+  string name = 2;
+  optional string description = 3;
+  TemplateContent content = 4;
+}
+
+message TemplateRef {
+  string id = 1;
+}
+
+message ListTemplatesRequest {
+  PageRequest page = 1;
+  Channel channel = 2;
+  bool include_archived = 3;
+}
+
+message ListTemplatesResponse {
+  repeated Template templates = 1;
+  PageInfo page = 2;
+}
+
+message CreateTemplateVersionRequest {
+  string template_id = 1;
+  TemplateContent content = 2;
+  bool activate = 3;
+}
+
+message ActivateTemplateVersionRequest {
+  string template_id = 1;
+  int32 version = 2;
+}
+
+message PreviewTemplateRequest {
+  string template_id = 1;
+  // Unset = the active version.
+  optional int32 version = 2;
+  google.protobuf.Struct data = 3;
+}
+
+message Template {
+  string id = 1;
+  Channel channel = 2;
+  string name = 3;
+  optional string description = 4;
+  int32 active_version = 5;
+  int32 latest_version = 6;
+  bool archived = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+message TemplateVersion {
+  string template_id = 1;
+  int32 version = 2;
+  TemplateContent content = 3;
+  bool active = 4;
+  google.protobuf.Timestamp created_at = 5;
+}
+
+message ListTemplateVersionsResponse {
+  // Newest first.
+  repeated TemplateVersion versions = 1;
+}
+
+message RenderedTemplate {
+  optional string subject = 1;
+  optional string body = 2;
+  optional string html = 3;
+}
