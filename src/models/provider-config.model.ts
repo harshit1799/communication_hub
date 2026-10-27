@@ -52,9 +52,14 @@ export class ProviderConfig {
   @Column({ name: 'is_active', type: 'boolean', default: true })
   isActive: boolean;
 
-  // Non-secret options (host, port, region, default sender, ...).
+  // Non-secret options (host, port, region, `from`, ...).
   @Column({ type: 'jsonb', default: () => "'{}'::jsonb" })
   settings: Record<string, string>;
+
+  // Named From addresses of this provider: { support: "Acme Support <support@acme.com>", ... }.
+  // settings.from stays the default; a send picks one of these by name.
+  @Column({ name: 'from_addresses', type: 'jsonb', default: () => "'{}'::jsonb" })
+  fromAddresses: Record<string, string>;
 
   // Secrets (passwords, API keys, service accounts). Encrypted at rest.
   @Column({ type: 'text', transformer: encryptedJson(ENCRYPTED.PROVIDER_CREDENTIALS) })

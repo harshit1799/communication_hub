@@ -22,7 +22,6 @@ export const PROTO_DIR = join(import.meta.dirname, '..', '..', 'proto');
 export const PROTO_FILES = [
   'communication_hub/v1/notification.proto',
   'communication_hub/v1/template.proto',
-  'communication_hub/v1/sender.proto',
   'communication_hub/v1/provider.proto',
   'communication_hub/v1/tenant.proto',
   'communication_hub/v1/device.proto',
@@ -36,10 +35,9 @@ export const PROTO_PACKAGES = ['communication_hub.v1', 'grpc.health.v1'];
 export const GRPC_SERVICES = [
   'communication_hub.v1.NotificationService',
   'communication_hub.v1.TemplateService',
-  'communication_hub.v1.SenderService',
   'communication_hub.v1.DeviceService',
   'communication_hub.v1.InboxService',
-  'communication_hub.v1.ProviderAdminService',
+  'communication_hub.v1.ProviderService',
   'communication_hub.v1.TenantAdminService',
 ];
 

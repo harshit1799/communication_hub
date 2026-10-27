@@ -31,7 +31,7 @@ export class HttpGatewayService implements OnApplicationBootstrap, OnApplication
     });
     const port = await this.gateway.start();
     this.logger.log(
-      `HTTP/JSON gateway on :${port} (POST /api/v1/<Service>/<Method>)` +
+      `REST gateway on :${port} (/api/v1/...)` +
         (app.http.swagger.enabled ? `; Swagger UI at http://localhost:${port}${app.http.swagger.path}` : ''),
     );
   }

@@ -13,6 +13,8 @@
  * PROTO_LOADER_OPTIONS), so the gateway can reuse the same serializers.
  */
 
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
 import protobuf from 'protobufjs';
 import { ProtoStruct, ProtoTimestamp, Struct, Timestamp } from '../grpc/codecs.js';
 import { PROTO_DIR, PROTO_FILES } from '../grpc/grpc.options.js';
@@ -23,12 +25,19 @@ const TIMESTAMP = '.google.protobuf.Timestamp';
 /** Thrown for request bodies that don't match the message type (-> HTTP 400). */
 export class JsonMappingError extends Error {}
 
-/** Loads every API proto (with comments, for the OpenAPI descriptions). */
+// protobufjs ships descriptor.proto (needed by google/api/annotations.proto).
+const PROTOBUFJS_DIR = dirname(createRequire(import.meta.url).resolve('protobufjs/package.json'));
+
+/** Loads every API proto (with comments and google.api.http options). */
 export function loadProtoRoot(): protobuf.Root {
   const root = new protobuf.Root();
-  // Resolve imports relative to proto/ (google/protobuf/* are bundled by protobufjs).
+  // google/protobuf/* are bundled by protobufjs; everything else is in proto/.
   root.resolvePath = (_origin, target) =>
-    target.startsWith('google/protobuf/') ? target : `${PROTO_DIR}/${target}`;
+    target === 'google/protobuf/descriptor.proto'
+      ? join(PROTOBUFJS_DIR, target)
+      : target.startsWith('google/protobuf/')
+        ? target
+        : join(PROTO_DIR, target);
   root.loadSync(PROTO_FILES, { keepCase: false, alternateCommentMode: true });
   root.resolveAll();
   return root;
@@ -60,7 +69,8 @@ export function jsonToMessage(type: protobuf.Type, json: unknown, path = ''): Re
   return out;
 }
 
-function fieldToMessage(field: protobuf.Field, value: unknown, where: string): unknown {
+/** One JSON value for a field (message, enum, Timestamp, Struct or scalar). */
+export function fieldToMessage(field: protobuf.Field, value: unknown, where: string): unknown {
   const resolved = field.resolvedType;
   if (resolved instanceof protobuf.Type) {
     if (resolved.fullName === TIMESTAMP) {
@@ -107,4 +117,55 @@ function fieldToJson(field: protobuf.Field, value: unknown): unknown {
   if (resolved.fullName === TIMESTAMP) return Timestamp.decode(value as ProtoTimestamp)?.toISOString();
   if (resolved.fullName === STRUCT) return Struct.decode(value as ProtoStruct);
   return messageToJson(resolved, value);
+}
+
+const INTEGER_TYPES = new Set(['int32', 'sint32', 'sfixed32', 'uint32', 'fixed32']);
+const LONG_TYPES = new Set(['int64', 'sint64', 'sfixed64', 'uint64', 'fixed64']);
+
+/** Converts a path / query string into the field's JSON value. */
+function parseParam(field: protobuf.Field, raw: string, where: string): unknown {
+  if (field.resolvedType instanceof protobuf.Type) {
+    if (field.resolvedType.fullName === TIMESTAMP) return fieldToMessage(field, raw, where);
+    throw new JsonMappingError(`${where} can't be set from the URL`);
+  }
+  if (field.resolvedType instanceof protobuf.Enum) return fieldToMessage(field, raw, where);
+  if (INTEGER_TYPES.has(field.type)) {
+    if (!/^-?\d+$/.test(raw)) throw new JsonMappingError(`${where} must be an integer`);
+    return Number(raw);
+  }
+  if (LONG_TYPES.has(field.type)) {
+    if (!/^-?\d+$/.test(raw)) throw new JsonMappingError(`${where} must be an integer`);
+    return raw;
+  }
+  if (field.type === 'bool') {
+    if (raw !== 'true' && raw !== 'false') throw new JsonMappingError(`${where} must be true or false`);
+    return raw === 'true';
+  }
+  if (field.type === 'double' || field.type === 'float') {
+    const n = Number(raw);
+    if (Number.isNaN(n)) throw new JsonMappingError(`${where} must be a number`);
+    return n;
+  }
+  return raw;
+}
+
+/**
+ * Sets a (possibly nested, e.g. "page.limit") field from URL strings: path
+ * parameters and query parameters. Repeated fields take every value.
+ */
+export function bindParam(type: protobuf.Type, message: Record<string, unknown>, path: string, values: string[]): void {
+  const parts = path.split('.');
+  let target = message;
+  let current = type;
+  for (const [i, part] of parts.entries()) {
+    const field = current.fields[camel(part)];
+    if (!field || field.map) throw new JsonMappingError(`unknown parameter "${path}"`);
+    if (i < parts.length - 1) {
+      if (!(field.resolvedType instanceof protobuf.Type) || field.repeated) throw new JsonMappingError(`unknown parameter "${path}"`);
+      target = (target[field.name] ??= {}) as Record<string, unknown>;
+      current = field.resolvedType;
+      continue;
+    }
+    target[field.name] = field.repeated ? values.map((v) => parseParam(field, v, path)) : parseParam(field, values.at(-1)!, path);
+  }
 }

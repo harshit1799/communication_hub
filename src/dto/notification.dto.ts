@@ -37,6 +37,7 @@ import {
   NotificationStatus,
   TEMPLATE_NAME_REGEX,
 } from '../constant/index.js';
+import { IsFromForChannel } from '../validator/from.validator.js';
 import { IsPushUserTarget, IsRecipientForChannel } from '../validator/notification.validator.js';
 
 /** Fields read by the conditional validators below. */
@@ -110,10 +111,12 @@ export class SendNotificationDto {
   @MaxLength(LIMITS.IDEMPOTENCY_KEY_MAX)
   idempotencyKey?: string;
 
-  // Explicit sender identity (email / sms).
+  // Email / SMS: overrides the provider's settings.from.
   @IsOptional()
-  @IsUUID()
-  senderId?: string;
+  @IsString()
+  @MaxLength(255)
+  @IsFromForChannel()
+  from?: string;
 
   // In-app only: also show a visible push (checked in NotificationService).
   @IsOptional()

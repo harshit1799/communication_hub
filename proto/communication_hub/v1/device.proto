@@ -3,16 +3,30 @@ syntax = "proto3";
 
 package communication_hub.v1;
 
+import "google/api/annotations.proto";
 import "google/protobuf/empty.proto";
 import "google/protobuf/timestamp.proto";
 
 service DeviceService {
   // Registers or refreshes a token (call on every app start / login).
-  rpc RegisterDevice(RegisterDeviceRequest) returns (Device);
+  rpc RegisterDevice(RegisterDeviceRequest) returns (Device) {
+    option (google.api.http) = {
+      post: "/v1/devices"
+      body: "*"
+    };
+  }
   // Every device of a user, including deactivated ones.
-  rpc ListDevices(ListDevicesRequest) returns (ListDevicesResponse);
+  rpc ListDevices(ListDevicesRequest) returns (ListDevicesResponse) {
+    option (google.api.http) = {
+      get: "/v1/devices"
+    };
+  }
   // NOT_FOUND if this tenant doesn't have the token.
-  rpc UnregisterDevice(UnregisterDeviceRequest) returns (google.protobuf.Empty);
+  rpc UnregisterDevice(UnregisterDeviceRequest) returns (google.protobuf.Empty) {
+    option (google.api.http) = {
+      delete: "/v1/devices/{token}"
+    };
+  }
 }
 
 enum DevicePlatform {

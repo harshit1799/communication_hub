@@ -7,7 +7,7 @@
 import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { JobsOptions, Queue } from 'bullmq';
-import { CHANNEL_QUEUE, NotificationChannel, QUEUE_PRIORITY } from '../../constant/index.js';
+import { CHANNEL_QUEUE, IN_FLIGHT_STATUSES, NotificationChannel, QUEUE_PRIORITY } from '../../constant/index.js';
 import { Notification } from '../../models/index.js';
 import { MetricsService } from '../../utils/metrics/metrics.service.js';
 
@@ -20,6 +20,19 @@ export interface NotificationJob {
 
 /** The notification fields needed to build a job. */
 type Enqueueable = Pick<Notification, 'id' | 'channel' | 'priority' | 'scheduledAt'>;
+
+/** Where a notification's job is in its queue (QueueInfo in the API). */
+export interface QueueSnapshot {
+  queue: string;
+  jobId: string;
+  // BullMQ state, or not_enqueued (in flight but no job: the sweeper will
+  // enqueue it) / removed (finished, job already pruned).
+  state: string;
+  priority: number;
+  attemptsMade: number;
+  maxAttempts: number;
+  runAt: Date | null;
+}
 
 /** Job states reported as queue health (metrics and readiness). */
 const DEPTH_STATES = ['waiting', 'delayed', 'active', 'failed'] as const;
@@ -101,6 +114,40 @@ export class NotificationQueue implements OnModuleInit {
   async remove(n: Enqueueable): Promise<void> {
     const job = await this.queues[n.channel].getJob(n.id);
     await job?.remove().catch(() => undefined);
+  }
+
+  /**
+   * The live state of the notification's job. Two Redis round trips; a
+   * missing job is reported from the notification row instead.
+   */
+  async inspect(
+    n: Enqueueable & Pick<Notification, 'status' | 'attempts'>,
+    defaultMaxAttempts: number,
+  ): Promise<QueueSnapshot> {
+    const queue = this.queues[n.channel];
+    const base = { queue: queue.name, jobId: n.id, priority: QUEUE_PRIORITY[n.priority] };
+    const job = await queue.getJob(n.id);
+    if (!job) {
+      return {
+        ...base,
+        state: IN_FLIGHT_STATUSES.includes(n.status) ? 'not_enqueued' : 'removed',
+        attemptsMade: n.attempts ?? 0,
+        maxAttempts: defaultMaxAttempts,
+        runAt: null,
+      };
+    }
+    const state = await job.getState();
+    const scheduled = n.scheduledAt && n.scheduledAt.getTime() > Date.now() ? n.scheduledAt : null;
+    // Retry backoff: the delay counts from the failed attempt (approximated by its start).
+    const backoffUntil = state === 'delayed' && !scheduled && job.delay > 0 ? new Date((job.processedOn ?? job.timestamp) + job.delay) : null;
+    return {
+      ...base,
+      state: state === 'unknown' ? 'not_enqueued' : state,
+      priority: job.opts.priority ?? base.priority,
+      attemptsMade: job.attemptsMade,
+      maxAttempts: job.opts.attempts ?? defaultMaxAttempts,
+      runAt: state === 'delayed' ? (scheduled ?? backoffUntil) : null,
+    };
   }
 
   /** Every queue, for health checks and metrics. */

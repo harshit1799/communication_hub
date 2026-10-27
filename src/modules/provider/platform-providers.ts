@@ -33,6 +33,8 @@ export function platformProviders(app: AppConfig): Record<ProviderChannel, Platf
     name: `platform-${provider}`,
     priority: 0,
     settings,
+    // The platform default has no named addresses (only MAIL_FROM / vendor default).
+    fromAddresses: {},
     credentials: null,
     // Env config only changes with a restart.
     version: 'env',
@@ -66,7 +68,7 @@ export function platformProviders(app: AppConfig): Record<ProviderChannel, Platf
         sms === ProviderKind.Twilio
           ? defined({ from: app.sms.twilio.from, messaging_service_sid: app.sms.twilio.messagingServiceSid })
           : sms === ProviderKind.Sns
-            ? defined({ region: app.aws.region, sender_id: app.sms.snsSenderId })
+            ? defined({ region: app.aws.region, from: app.sms.snsSenderId })
             : {},
       ),
       credentials:

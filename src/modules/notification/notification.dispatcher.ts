@@ -4,9 +4,11 @@
  *   1. claim it (queued/retrying -> processing, attempts + 1); skip if it
  *      was sent or cancelled meanwhile, which makes redelivery harmless
  *   2. render the pinned template version / inline text with tenant branding
- *   3. pick the sender (request > rule > tenant default, SenderResolver)
- *   4. get the tenant's providers in failover order (ProviderResolver:
- *      Redis cache -> Postgres -> platform default) and try them in turn
+ *   3. get the tenant's providers in failover order (ProviderResolver:
+ *      Redis cache -> Postgres -> platform default), narrowed by the
+ *      requested From (a From name only goes to providers that have it, see
+ *      provider/from-addresses.ts), and try them in turn, each sending as its
+ *      own address
  *   5. record every provider call and the outcome
  *
  * Errors: PermanentDeliveryError -> failed now (UnrecoverableError stops
@@ -14,7 +16,7 @@
  * other error -> next provider; when all failed -> retrying, rethrown so
  * BullMQ retries with exponential backoff; on the last attempt -> failed.
  *
- * In-app (CHANNEL_IN_APP): step 4-5 become "write the inbox row" (the
+ * In-app (CHANNEL_IN_APP): step 3-4 become "write the inbox row" (the
  * delivery, idempotent per notification), then a best-effort FCM signal to
  * the user's devices through the push providers: silent data message, or a
  * visible push with alsoPush. A failed signal never fails the delivery:
@@ -44,8 +46,8 @@ import { RenderedContent, TemplateData } from '../../utils/template/template-ren
 import { DeviceRepository } from '../device/device.repository.js';
 import { InboxService } from '../inbox/inbox.service.js';
 import { ProviderResolver } from '../provider/provider.resolver.js';
+import { selectFrom } from '../provider/from-addresses.js';
 import type { ProviderHandle } from '../provider/provider.types.js';
-import { ResolvedSender, SenderResolver } from '../sender/sender.resolver.js';
 import { TemplateService } from '../template/template.service.js';
 import { NotificationAttemptRepository } from './notification-attempt.repository.js';
 import { NotificationRepository } from './notification.repository.js';
@@ -54,8 +56,10 @@ import type { NotificationJob } from './notification.queue.js';
 /** Everything prepared before the first provider call. */
 interface Prepared {
   content: RenderedContent;
-  sender: ResolvedSender | null;
+  // The providers to try, in failover order (already narrowed by the requested From).
   providers: ProviderHandle[];
+  // The From each provider sends as (null: push / in-app, or SMS vendor default).
+  fromFor: (handle: ProviderHandle) => string | null;
 }
 
 /** Only consumes jobs in worker processes (see WorkerLifecycle). */
@@ -70,7 +74,6 @@ export class NotificationDispatcher {
     private readonly attempts: NotificationAttemptRepository,
     private readonly devices: DeviceRepository,
     private readonly templates: TemplateService,
-    private readonly senders: SenderResolver,
     private readonly providers: ProviderResolver,
     private readonly metrics: MetricsService,
     private readonly inbox: InboxService,
@@ -104,22 +107,23 @@ export class NotificationDispatcher {
     const lastAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
     const base = { notificationId: n.id, tenantId: n.tenantId, channel: n.channel, attempt };
 
-    // Rendering, sender and provider lookup. Failing here counts as an
-    // attempt without a provider call ("template", "sender", ...).
+    // Rendering and provider lookup. Failing here counts as an attempt
+    // without a provider call ("template", ...).
     let prepared: Prepared;
     try {
       prepared = await this.prepare(n);
     } catch (err) {
       const provider = err instanceof PermanentDeliveryError ? err.provider : this.providers.platformName(n.channel);
-      await this.fail(n, attempt, provider, null, err, 0, lastAttempt, base);
+      await this.fail(n, attempt, provider, null, null, err, 0, lastAttempt, base);
       throw err instanceof PermanentDeliveryError ? new UnrecoverableError(errorMessage(err)) : err;
     }
 
     if (n.channel === NotificationChannel.InApp) return this.deliverInApp(n, attempt, prepared, lastAttempt, base);
 
-    const { providers, sender } = prepared;
+    const { providers } = prepared;
     for (const [index, handle] of providers.entries()) {
       const provider = handle.spec.provider;
+      const sender = prepared.fromFor(handle);
       const started = Date.now();
       let result: DeliveryResult;
       try {
@@ -129,7 +133,7 @@ export class NotificationDispatcher {
         this.metrics.deliveryDuration.observe({ channel: n.channel, provider }, durationMs / 1000);
         const isLast = index === providers.length - 1;
         if (err instanceof PermanentDeliveryError || isLast) {
-          await this.fail(n, attempt, provider, sender, err, durationMs, lastAttempt, { ...base, providerConfigId: handle.spec.id });
+          await this.fail(n, attempt, provider, handle, sender, err, durationMs, lastAttempt, { ...base, providerConfigId: handle.spec.id });
           if (err instanceof PermanentDeliveryError) {
             await this.devices.deactivate(n.tenantId, err.invalidTokens);
             throw new UnrecoverableError(errorMessage(err));
@@ -137,7 +141,7 @@ export class NotificationDispatcher {
           throw err;
         }
         // Transient: hand over to the next provider within this attempt.
-        await this.recordAttempt(n.id, attempt, provider, sender, false, null, errorMessage(err), false, durationMs);
+        await this.recordAttempt(n.id, attempt, provider, handle, sender, false, null, errorMessage(err), false, durationMs);
         this.metrics.attempts.inc({ channel: n.channel, provider, outcome: 'transient_error' });
         this.metrics.failovers.inc({ channel: n.channel, from_provider: provider });
         this.logger.warn({
@@ -158,8 +162,8 @@ export class NotificationDispatcher {
       const durationMs = Date.now() - started;
       this.metrics.deliveryDuration.observe({ channel: n.channel, provider }, durationMs / 1000);
       this.metrics.attempts.inc({ channel: n.channel, provider, outcome: 'success' });
-      await this.recordAttempt(n.id, attempt, result.provider, sender, true, result.providerMessageId, null, false, durationMs);
-      await this.notifications.markSent(n.id, result.provider, result.providerMessageId);
+      await this.recordAttempt(n.id, attempt, result.provider, handle, sender, true, result.providerMessageId, null, false, durationMs);
+      await this.notifications.markSent(n.id, result.provider, result.providerMessageId, { sentFrom: sender, providerName: handle.spec.name });
       await this.devices.deactivate(n.tenantId, result.invalidTokens ?? []);
       this.metrics.finished.inc({ channel: n.channel, status: NotificationStatus.Sent });
       this.logger.log({
@@ -168,8 +172,9 @@ export class NotificationDispatcher {
         ...base,
         provider: result.provider,
         providerConfigId: handle.spec.id,
+        providerName: handle.spec.name,
         providerMessageId: result.providerMessageId,
-        senderSource: sender?.source,
+        from: sender ?? undefined,
         durationMs,
       });
       return;
@@ -192,14 +197,14 @@ export class NotificationDispatcher {
     try {
       message = await this.inbox.deliver(n, { title: content.subject, body: content.body });
     } catch (err) {
-      await this.fail(n, attempt, 'inbox', null, err, Date.now() - started, lastAttempt, base);
+      await this.fail(n, attempt, 'inbox', null, null, err, Date.now() - started, lastAttempt, base);
       throw err;
     }
     const durationMs = Date.now() - started;
     this.metrics.deliveryDuration.observe({ channel: n.channel, provider: 'inbox' }, durationMs / 1000);
     this.metrics.attempts.inc({ channel: n.channel, provider: 'inbox', outcome: 'success' });
-    await this.recordAttempt(n.id, attempt, 'inbox', null, true, message.id, null, false, durationMs);
-    await this.notifications.markSent(n.id, 'inbox', message.id);
+    await this.recordAttempt(n.id, attempt, 'inbox', null, null, true, message.id, null, false, durationMs);
+    await this.notifications.markSent(n.id, 'inbox', message.id, { sentFrom: null, providerName: 'inbox' });
     this.metrics.finished.inc({ channel: n.channel, status: NotificationStatus.Sent });
     this.logger.log({ msg: `Stored in inbox (attempt ${attempt})`, event: 'delivery_sent', ...base, provider: 'inbox', inboxMessageId: message.id, durationMs });
 
@@ -240,18 +245,17 @@ export class NotificationDispatcher {
     }
   }
 
-  /** Renders content and resolves sender + providers. */
+  /**
+   * Renders content, resolves the tenant's providers and narrows them by the
+   * requested From. A From name removed after the send was accepted can't be
+   * honoured: permanent failure rather than sending from another address.
+   */
   private async prepare(n: Notification): Promise<Prepared> {
     const content = await this.render(n);
-    const sender = await this.senders.resolve({
-      tenantId: n.tenantId,
-      channel: n.channel,
-      senderId: n.senderId,
-      templateId: n.templateId,
-      recipient: n.recipient,
-    });
-    const providers = await this.providers.resolve(n.tenantId, n.channel, sender?.providerConfigId);
-    return { content, sender, providers };
+    const handles = await this.providers.resolve(n.tenantId, n.channel);
+    const selection = selectFrom(n.channel, handles, n.fromAddress, this.mailFrom);
+    if (!selection.ok) throw new PermanentDeliveryError(selection.error, 'from');
+    return { content, providers: selection.handles, fromFor: selection.fromFor };
   }
 
   /**
@@ -288,20 +292,21 @@ export class NotificationDispatcher {
   }
 
   /** One provider call for the notification's channel. */
-  private async send(n: Notification, handle: ProviderHandle, { content, sender }: Prepared): Promise<DeliveryResult> {
+  private async send(n: Notification, handle: ProviderHandle, { content, fromFor }: Prepared): Promise<DeliveryResult> {
+    const from = fromFor(handle);
     const client = await handle.client();
     switch (n.channel) {
       case NotificationChannel.Email:
         return (client as EmailProvider).send({
           to: n.recipient!,
-          from: sender?.value ?? this.mailFrom,
+          from: from!,
           subject: content.subject ?? '',
           text: content.body,
           html: content.html,
         });
 
       case NotificationChannel.Sms:
-        return (client as SmsProvider).send({ to: n.recipient!, body: content.body ?? '', from: sender?.value });
+        return (client as SmsProvider).send({ to: n.recipient!, body: content.body ?? '', from: from ?? undefined });
 
       case NotificationChannel.InApp:
         throw new Error('in-app notifications are delivered by deliverInApp');
@@ -327,7 +332,8 @@ export class NotificationDispatcher {
     n: Notification,
     attempt: number,
     provider: string,
-    sender: ResolvedSender | null,
+    handle: ProviderHandle | null,
+    sender: string | null,
     err: unknown,
     durationMs: number,
     lastAttempt: boolean,
@@ -336,8 +342,8 @@ export class NotificationDispatcher {
     const message = errorMessage(err);
     const permanent = err instanceof PermanentDeliveryError;
     const status = permanent || lastAttempt ? NotificationStatus.Failed : NotificationStatus.Retrying;
-    await this.recordAttempt(n.id, attempt, provider, sender, false, null, message, permanent, durationMs);
-    await this.notifications.markFailure(n.id, status, provider, message);
+    await this.recordAttempt(n.id, attempt, provider, handle, sender, false, null, message, permanent, durationMs);
+    await this.notifications.markFailure(n.id, status, provider, message, handle?.spec.name ?? null);
     this.metrics.attempts.inc({ channel: n.channel, provider, outcome: permanent ? 'permanent_error' : 'transient_error' });
     if (status === NotificationStatus.Failed) this.metrics.finished.inc({ channel: n.channel, status });
     else this.metrics.retries.inc({ channel: n.channel });
@@ -357,7 +363,8 @@ export class NotificationDispatcher {
     notificationId: string,
     attempt: number,
     provider: string,
-    sender: ResolvedSender | null,
+    handle: ProviderHandle | null,
+    sender: string | null,
     success: boolean,
     providerMessageId: string | null,
     error: string | null,
@@ -368,7 +375,9 @@ export class NotificationDispatcher {
       notificationId,
       attempt,
       provider,
-      sender: sender?.value ?? null,
+      providerName: handle?.spec.name ?? null,
+      providerConfigId: handle?.spec.id ?? null,
+      sender,
       success,
       providerMessageId,
       error,

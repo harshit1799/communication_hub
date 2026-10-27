@@ -1,20 +1,25 @@
 /**
  * Builds the OpenAPI 3 document for Swagger UI from the .proto files, so
- * the HTTP docs can never drift from the gRPC contract: every RPC becomes
- *
- *   POST /api/v1/<Service>/<Method>    body = request message, 200 = response message
+ * the HTTP docs can never drift from the gRPC contract: every RPC with a
+ * google.api.http annotation becomes its REST operation (verb, path params,
+ * query params, body), e.g. GET /api/v1/notifications/{id}.
  *
  * Descriptions come from the proto comments.
  */
 
 import protobuf from 'protobufjs';
 import { METADATA } from '../constant/index.js';
+import { httpBinding } from './http-rules.js';
+
+const toSnake = (name: string) => name.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+const toCamel = (name: string) => name.replace(/_([a-z0-9])/g, (_m, c: string) => c.toUpperCase());
 
 export const API_PACKAGE = 'communication_hub.v1';
-export const GATEWAY_PREFIX = '/api/v1';
+// REST paths in the protos start with /v1: /api/v1/notifications, ...
+export const GATEWAY_PREFIX = '/api';
 
 /** Services whose RPCs require x-admin-key instead of x-api-key. */
-export const ADMIN_SERVICES = new Set(['TenantAdminService', 'ProviderAdminService']);
+export const ADMIN_SERVICES = new Set(['TenantAdminService']);
 
 type Schema = Record<string, unknown>;
 
@@ -91,31 +96,90 @@ export function buildOpenApi(root: protobuf.Root, info: { title: string; version
     properties: Object.fromEntries(type.fieldsArray.map((f) => [f.name, fieldSchema(f)])),
   });
 
+  /** Query parameters: every field not in the path / body; nested messages flattened one level ("page.limit"). */
+  const queryParams = (type: protobuf.Type, exclude: Set<string>, prefix = ''): Schema[] =>
+    type.fieldsArray.flatMap((f) => {
+      const name = `${prefix}${toSnake(f.name)}`;
+      if (exclude.has(name) || f.map) return [];
+      const resolved = f.resolvedType;
+      const wkt = resolved && ['.google.protobuf.Timestamp'].includes(resolved.fullName);
+      if (resolved instanceof protobuf.Type && !wkt) return prefix || f.repeated ? [] : queryParams(resolved, exclude, `${name}.`);
+      const item = resolved ? refFor(resolved as protobuf.Type) : (SCALARS[f.type] ?? { type: 'string' });
+      return [
+        {
+          name,
+          in: 'query',
+          required: false,
+          description: describe(f.comment),
+          schema: f.repeated ? { type: 'array', items: item } : item,
+          ...(f.repeated ? { style: 'form', explode: true } : {}),
+        },
+      ];
+    });
+
+  /** Request schema for `body: "*"`: the message without the path-bound fields. */
+  const bodySchema = (type: protobuf.Type, pathParams: string[]): Schema => {
+    if (pathParams.length === 0) return refFor(type);
+    const full = messageSchema(type) as { properties: Record<string, Schema> };
+    const pathFields = new Set(pathParams.map(toCamel));
+    return {
+      ...full,
+      properties: Object.fromEntries(Object.entries(full.properties).filter(([k]) => !pathFields.has(k))),
+    };
+  };
+
+  const STATUS_TEXT: Record<number, string> = { 200: 'OK', 201: 'Created', 202: 'Accepted (delivered asynchronously)', 204: 'No Content' };
+
   const tags: { name: string; description?: string }[] = [];
-  const paths: Record<string, unknown> = {};
+  const paths: Record<string, Record<string, unknown>> = {};
   for (const service of pkg.nestedArray.filter((n): n is protobuf.Service => n instanceof protobuf.Service)) {
     const admin = ADMIN_SERVICES.has(service.name);
     tags.push({ name: service.name, description: describe(service.comment) });
     for (const method of service.methodsArray) {
+      const binding = httpBinding(method, GATEWAY_PREFIX);
+      if (!binding) continue;
       const request = method.resolvedRequestType!;
       const response = method.resolvedResponseType!;
       const description = describe(method.comment);
-      paths[`${GATEWAY_PREFIX}/${service.name}/${method.name}`] = {
-        post: {
-          tags: [service.name],
-          operationId: `${service.name}_${method.name}`,
-          summary: description?.split('\n')[0] ?? method.name,
-          description: `${description ?? ''}\n\ngRPC: \`${API_PACKAGE}.${service.name}/${method.name}\``.trim(),
-          security: [{ [admin ? 'adminKey' : 'apiKey']: [] }],
-          parameters: [
-            { name: METADATA.REQUEST_ID, in: 'header', required: false, schema: { type: 'string' }, description: 'Your trace id; echoed back and written to every log line' },
-            { name: METADATA.LANGUAGE, in: 'header', required: false, schema: { type: 'string', example: 'en' }, description: 'Language of error messages' },
-          ],
-          requestBody: { required: true, content: { 'application/json': { schema: refFor(request) } } },
-          responses: {
-            200: { description: 'OK', content: { 'application/json': { schema: refFor(response) } } },
-            default: { description: 'Error (HTTP status mapped from the gRPC code)', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
-          },
+      const pathParams = binding.pathParams.map((name) => {
+        const field = request.fields[toCamel(name)];
+        return {
+          name,
+          in: 'path',
+          required: true,
+          description: describe(field?.comment),
+          schema: field ? (field.resolvedType ? refFor(field.resolvedType as protobuf.Type) : (SCALARS[field.type] ?? { type: 'string' })) : { type: 'string' },
+        };
+      });
+      const exclude = new Set([...binding.pathParams, ...(binding.body ? [binding.body] : [])]);
+      const query = binding.body === '*' ? [] : queryParams(request, exclude);
+      let requestBody: unknown;
+      if (binding.body === '*') {
+        requestBody = { required: true, content: { 'application/json': { schema: bodySchema(request, binding.pathParams) } } };
+      } else if (binding.body) {
+        const field = request.fields[toCamel(binding.body)];
+        requestBody = { required: true, content: { 'application/json': { schema: refFor(field.resolvedType as protobuf.Type) } } };
+      }
+      const success = binding.successStatus;
+      (paths[`${GATEWAY_PREFIX}${binding.template}`] ??= {})[binding.verb.toLowerCase()] = {
+        tags: [service.name],
+        operationId: `${service.name}_${method.name}`,
+        summary: description?.split('\n')[0] ?? method.name,
+        description: `${description ?? ''}\n\ngRPC: \`${API_PACKAGE}.${service.name}/${method.name}\``.trim(),
+        security: [{ [admin ? 'adminKey' : 'apiKey']: [] }],
+        parameters: [
+          ...pathParams,
+          ...query,
+          { name: METADATA.REQUEST_ID, in: 'header', required: false, schema: { type: 'string' }, description: 'Your trace id; echoed back and written to every log line' },
+          { name: METADATA.LANGUAGE, in: 'header', required: false, schema: { type: 'string', example: 'en' }, description: 'Language of error messages' },
+        ],
+        ...(requestBody ? { requestBody } : {}),
+        responses: {
+          [success]:
+            success === 204
+              ? { description: STATUS_TEXT[204] }
+              : { description: STATUS_TEXT[success], content: { 'application/json': { schema: refFor(response) } } },
+          default: { description: 'Error (HTTP status mapped from the gRPC code)', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
         },
       };
     }
@@ -127,8 +191,10 @@ export function buildOpenApi(root: protobuf.Root, info: { title: string; version
       title: info.title,
       version: info.version,
       description:
-        'HTTP/JSON gateway to the Communication Hub gRPC API (`proto/communication_hub/v1`). ' +
-        'Every operation is the gRPC method of the same name: same validation, auth, rate limits and errors. ' +
+        'REST/JSON gateway to the Communication Hub gRPC API (`proto/communication_hub/v1`). ' +
+        'Every operation is a gRPC method (named in its description): same validation, auth, rate limits and errors. ' +
+        'Reads are GET (filters and pagination as query parameters, e.g. `?page.limit=20&page.cursor=...`), ' +
+        'creates POST (201; sends 202, delivery is asynchronous), partial updates PATCH, deletes DELETE (204). ' +
         `Tenant services need the \`${METADATA.API_KEY}\` header, admin services \`${METADATA.ADMIN_KEY}\`. ` +
         'Enums are their proto names (e.g. `CHANNEL_EMAIL`), times RFC 3339 strings, `data` a JSON object.',
     },

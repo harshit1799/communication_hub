@@ -3,13 +3,16 @@
  * before it is stored. One place knows what every provider kind needs:
  *
  *   kind       settings                         credentials
- *   smtp       host*, port, secure              user, pass
- *   ses        region*                          access_key_id, secret_access_key
- *   sendgrid   -                                api_key*
+ *   smtp       host*, port, secure, from        user, pass
+ *   ses        region*, from                    access_key_id, secret_access_key
+ *   sendgrid   from                             api_key*
  *   twilio     from, messaging_service_sid      account_sid*, auth_token*
- *   sns        region*, sender_id               access_key_id, secret_access_key
+ *   sns        region*, from (sender id)        access_key_id, secret_access_key
  *   fcm        -                                service_account*
- *   console    -                                -
+ *   console    from                             -
+ *
+ * `from` is the "From" the provider sends as (format checked per channel);
+ * NotificationInput.from overrides it per message.
  *   (* required)
  *
  * Vendor SDKs are imported only when a config of that kind is first used.
@@ -17,6 +20,7 @@
 
 import { CHANNEL_PROVIDERS, NotificationChannel, ProviderChannel, ProviderKind } from '../../constant/index.js';
 import type { ChannelProvider } from '../../utils/channel/channel.types.js';
+import { isFromValue } from '../../validator/from.validator.js';
 import { ConsoleProvider } from '../../utils/channel/console.provider.js';
 
 /** Required / allowed keys per provider kind. */
@@ -26,22 +30,22 @@ interface KindRules {
 }
 
 const RULES: Record<ProviderKind, KindRules> = {
-  [ProviderKind.Console]: { settings: { required: [], optional: [] }, credentials: { required: [], optional: [] } },
+  [ProviderKind.Console]: { settings: { required: [], optional: ['from'] }, credentials: { required: [], optional: [] } },
   [ProviderKind.Smtp]: {
-    settings: { required: ['host'], optional: ['port', 'secure'] },
+    settings: { required: ['host'], optional: ['port', 'secure', 'from'] },
     credentials: { required: [], optional: ['user', 'pass'] },
   },
   [ProviderKind.Ses]: {
-    settings: { required: ['region'], optional: [] },
+    settings: { required: ['region'], optional: ['from'] },
     credentials: { required: [], optional: ['access_key_id', 'secret_access_key'] },
   },
-  [ProviderKind.Sendgrid]: { settings: { required: [], optional: [] }, credentials: { required: ['api_key'], optional: [] } },
+  [ProviderKind.Sendgrid]: { settings: { required: [], optional: ['from'] }, credentials: { required: ['api_key'], optional: [] } },
   [ProviderKind.Twilio]: {
     settings: { required: [], optional: ['from', 'messaging_service_sid'] },
     credentials: { required: ['account_sid', 'auth_token'], optional: [] },
   },
   [ProviderKind.Sns]: {
-    settings: { required: ['region'], optional: ['sender_id'] },
+    settings: { required: ['region'], optional: ['from'] },
     credentials: { required: [], optional: ['access_key_id', 'secret_access_key'] },
   },
   [ProviderKind.Fcm]: { settings: { required: [], optional: [] }, credentials: { required: ['service_account'], optional: [] } },
@@ -76,6 +80,13 @@ export function validateProviderConfig(
   };
   check('settings', settings);
   check('credentials', credentials);
+  if (settings.from !== undefined && !isFromValue(channel, settings.from)) {
+    errors.push(
+      channel === NotificationChannel.Email
+        ? 'settings.from must be an email address, optionally "Name <address>"'
+        : 'settings.from must be an E.164 number, a short code or a 3-11 character alphanumeric sender id',
+    );
+  }
   if (settings.port !== undefined && !/^\d{1,5}$/.test(settings.port)) errors.push('settings.port must be a number');
   if (settings.secure !== undefined && !['true', 'false'].includes(settings.secure)) errors.push('settings.secure must be true or false');
   const aws = ['access_key_id', 'secret_access_key'].filter((k) => credentials[k]);
@@ -135,7 +146,7 @@ export async function createProviderClient(
     }
     case ProviderKind.Sns: {
       const { SnsSmsProvider } = await import('../../utils/sms/providers/sns.provider.js');
-      return new SnsSmsProvider(aws(), settings.sender_id);
+      return new SnsSmsProvider(aws(), settings.from);
     }
     case ProviderKind.Fcm: {
       const { FcmPushProvider } = await import('../../utils/firebase/fcm.provider.js');

@@ -9,7 +9,6 @@ import { Notification, NotificationAttempt } from '../../models/index.js';
 import { DeviceModule } from '../device/device.module.js';
 import { InboxModule } from '../inbox/inbox.module.js';
 import { ProviderModule } from '../provider/provider.module.js';
-import { SenderModule } from '../sender/sender.module.js';
 import { TemplateModule } from '../template/template.module.js';
 import { MaintenanceProcessor } from './maintenance.processor.js';
 import { NotificationAttemptRepository } from './notification-attempt.repository.js';
@@ -30,7 +29,6 @@ const workers = [NotificationDispatcher, EmailProcessor, SmsProcessor, PushProce
   imports: [
     TypeOrmModule.forFeature([Notification, NotificationAttempt]),
     TemplateModule,
-    SenderModule,
     ProviderModule,
     DeviceModule,
     InboxModule,

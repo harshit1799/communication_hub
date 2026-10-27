@@ -66,13 +66,10 @@ export const ERROR = {
   TEMPLATE_VERSION_NOT_FOUND: { type: 'TEMPLATE_VERSION_NOT_FOUND', status: HttpStatus.NOT_FOUND },
   TEMPLATE_ARCHIVED: { type: 'TEMPLATE_ARCHIVED', status: HttpStatus.CONFLICT },
   TEMPLATE_INVALID: { type: 'TEMPLATE_INVALID', status: HttpStatus.BAD_REQUEST },
-  // Senders
-  SENDER_NOT_FOUND: { type: 'SENDER_NOT_FOUND', status: HttpStatus.NOT_FOUND },
-  SENDER_VALUE_TAKEN: { type: 'SENDER_VALUE_TAKEN', status: HttpStatus.CONFLICT },
-  SENDER_RULE_NOT_FOUND: { type: 'SENDER_RULE_NOT_FOUND', status: HttpStatus.NOT_FOUND },
   // Providers
   PROVIDER_CONFIG_NOT_FOUND: { type: 'PROVIDER_CONFIG_NOT_FOUND', status: HttpStatus.NOT_FOUND },
   PROVIDER_CONFIG_INVALID: { type: 'PROVIDER_CONFIG_INVALID', status: HttpStatus.BAD_REQUEST },
+  FROM_NOT_FOUND: { type: 'FROM_NOT_FOUND', status: HttpStatus.NOT_FOUND },
   PROVIDER_NAME_TAKEN: { type: 'PROVIDER_NAME_TAKEN', status: HttpStatus.CONFLICT },
   // Inbox
   INBOX_MESSAGE_NOT_FOUND: { type: 'INBOX_MESSAGE_NOT_FOUND', status: HttpStatus.NOT_FOUND },

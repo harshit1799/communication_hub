@@ -27,7 +27,6 @@ import { HealthModule } from './modules/health/health.module.js';
 import { InboxModule } from './modules/inbox/inbox.module.js';
 import { NotificationModule } from './modules/notification/notification.module.js';
 import { ProviderModule } from './modules/provider/provider.module.js';
-import { SenderModule } from './modules/sender/sender.module.js';
 import { TemplateModule } from './modules/template/template.module.js';
 import { TenantModule } from './modules/tenant/tenant.module.js';
 import { CryptoModule } from './utils/crypto/crypto.module.js';
@@ -103,7 +102,6 @@ const appConfig = (config: ConfigService) => config.getOrThrow<AppConfig>('app')
     HealthModule,
     TenantModule,
     TemplateModule,
-    SenderModule,
     ProviderModule,
     DeviceModule,
     InboxModule,

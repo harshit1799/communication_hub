@@ -12,8 +12,8 @@ import {
 } from 'typeorm';
 
 /**
- * Per-tenant branding. Senders live in `sender_identities` and providers in
- * `provider_configs` (the former emailFrom/smsFrom settings were migrated).
+ * Per-tenant branding. Providers (with their "From") live in
+ * `provider_configs`.
  */
 export interface TenantSettings {
   // Brand name shown in templates as {{appName}} (falls back to APP_NAME).
@@ -22,7 +22,7 @@ export interface TenantSettings {
 
 /**
  * A white-label client. Owns its API keys, notifications, devices,
- * templates, senders and provider configs (all deleted with it via
+ * templates and provider configs (all deleted with it via
  * ON DELETE CASCADE).
  */
 @Entity('tenants')

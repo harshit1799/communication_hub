@@ -32,7 +32,7 @@ export class ProviderConfigRepository extends BaseRepository<ProviderConfig> {
    */
   async activeSpecs(tenantId: string, channel: ProviderChannel): Promise<ProviderSpec[]> {
     const rows = await this.queryBuilder('p')
-      .select(['p.id', 'p.channel', 'p.provider', 'p.name', 'p.priority', 'p.settings', 'p.credentials', 'p.updatedAt'])
+      .select(['p.id', 'p.channel', 'p.provider', 'p.name', 'p.priority', 'p.settings', 'p.fromAddresses', 'p.credentials', 'p.updatedAt'])
       .where('p.tenant_id = :tenantId AND p.channel = :channel AND p.is_active', { tenantId, channel })
       .orderBy('p.priority', 'ASC')
       .addOrderBy('p.name', 'ASC')
@@ -43,6 +43,7 @@ export class ProviderConfigRepository extends BaseRepository<ProviderConfig> {
         p_name: string;
         p_priority: number;
         p_settings: Record<string, string>;
+        p_from_addresses: Record<string, string>;
         p_credentials: string;
         p_updated_at: Date;
       }>();
@@ -53,6 +54,7 @@ export class ProviderConfigRepository extends BaseRepository<ProviderConfig> {
       name: r.p_name,
       priority: r.p_priority,
       settings: r.p_settings,
+      fromAddresses: r.p_from_addresses ?? {},
       credentials: r.p_credentials,
       version: new Date(r.p_updated_at).toISOString(),
     }));

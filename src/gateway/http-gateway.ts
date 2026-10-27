@@ -1,9 +1,11 @@
 /**
  * HTTP/JSON gateway in front of the gRPC API, plus Swagger UI.
  *
- *   POST /api/v1/<Service>/<Method>   JSON body -> gRPC call on this process -> JSON
- *   GET  /docs                        Swagger UI (assets from swagger-ui-dist, no CDN)
- *   GET  /docs/openapi.json           OpenAPI 3, generated from proto/
+ *   GET /api/v1/notifications/{id}, POST /api/v1/notifications, ...
+ *        REST routes from the protos' google.api.http annotations
+ *        (http-rules.ts) -> gRPC call on this process -> JSON
+ *   GET  /docs                Swagger UI (assets from swagger-ui-dist, no CDN)
+ *   GET  /docs/openapi.json   OpenAPI 3, generated from proto/
  *
  * The gateway is a gRPC *client* of the local server: requests pass the
  * exact same pipeline (auth, rate limit, validation, errors, logs, metrics)
@@ -26,8 +28,9 @@ import { METADATA } from '../constant/index.js';
 import { PROTO_FILES, PROTO_LOADER_OPTIONS } from '../grpc/grpc.options.js';
 import { safeEqual } from '../utils/appUtils.js';
 import { resolveRequestId } from '../utils/request-context.js';
+import { buildRequest, HttpBinding, httpBinding, specificity } from './http-rules.js';
 import { API_PACKAGE, buildOpenApi, GATEWAY_PREFIX } from './openapi.js';
-import { JsonMappingError, jsonToMessage, loadProtoRoot, messageToJson } from './proto-json.js';
+import { JsonMappingError, loadProtoRoot, messageToJson } from './proto-json.js';
 
 export interface GatewayOptions {
   // host:port of the gRPC server to forward to.
@@ -72,6 +75,8 @@ const SWAGGER_ASSETS: Record<string, string> = {
 };
 
 interface Route {
+  binding: HttpBinding;
+  // gRPC path, e.g. /communication_hub.v1.NotificationService/GetNotification
   path: string;
   request: protobuf.Type;
   response: protobuf.Type;
@@ -89,7 +94,8 @@ class HttpError extends Error {
 }
 
 export class HttpGateway {
-  private readonly routes = new Map<string, Route>();
+  // Most specific first (literal segments before parameters).
+  private readonly routes: Route[] = [];
   private readonly client: grpc.Client;
   private readonly openApi: string;
   private readonly swaggerDir: string;
@@ -103,7 +109,10 @@ export class HttpGateway {
       if (!(service instanceof protobuf.Service)) continue;
       const methods = definition[`${API_PACKAGE}.${service.name}`] as protoLoader.ServiceDefinition;
       for (const method of service.methodsArray) {
-        this.routes.set(`${GATEWAY_PREFIX}/${service.name}/${method.name}`, {
+        const binding = httpBinding(method, GATEWAY_PREFIX);
+        if (!binding) continue;
+        this.routes.push({
+          binding,
           path: `/${API_PACKAGE}.${service.name}/${method.name}`,
           request: method.resolvedRequestType!,
           response: method.resolvedResponseType!,
@@ -111,6 +120,7 @@ export class HttpGateway {
         });
       }
     }
+    this.routes.sort((a, b) => specificity(b.binding) - specificity(a.binding));
     // One channel for every service (generic client + per-method serializers).
     this.client = new grpc.Client(options.grpcTarget, grpc.credentials.createInsecure());
     this.openApi = JSON.stringify(buildOpenApi(root, { title: options.title, version: '1.0' }));
@@ -140,18 +150,20 @@ export class HttpGateway {
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     res.setHeader('x-content-type-options', 'nosniff');
-    const url = (req.url ?? '/').split('?')[0];
+    const parsed = new URL(req.url ?? '/', 'http://gateway');
+    const url = parsed.pathname;
     const docs = this.options.swagger.path.replace(/\/$/, '');
 
     if (this.options.swagger.enabled && (url === docs || url.startsWith(`${docs}/`))) {
       return this.serveDocs(req, res, url.slice(docs.length) || '/');
     }
 
-    const route = this.routes.get(url);
-    if (!route) throw new HttpError(404, 'NOT_FOUND', `No route ${req.method} ${url}`);
-    if (req.method !== 'POST') {
-      res.setHeader('allow', 'POST');
-      throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Use POST with a JSON body');
+    const matching = this.routes.filter((r) => r.binding.regex.test(url));
+    if (matching.length === 0) throw new HttpError(404, 'NOT_FOUND', `No route ${req.method} ${url}`);
+    const route = matching.find((r) => r.binding.verb === req.method);
+    if (!route) {
+      res.setHeader('allow', [...new Set(matching.map((r) => r.binding.verb))].join(', '));
+      throw new HttpError(405, 'METHOD_NOT_ALLOWED', `${req.method} is not supported on ${url}`);
     }
 
     const requestId = resolveRequestId(req.headers[METADATA.REQUEST_ID]);
@@ -165,7 +177,8 @@ export class HttpGateway {
 
     let message: Record<string, unknown>;
     try {
-      message = jsonToMessage(route.request, await this.readJson(req));
+      const pathValues = route.binding.regex.exec(url)!.slice(1);
+      message = buildRequest(route.request, route.binding, pathValues, parsed.searchParams, await this.readJson(req));
     } catch (err) {
       if (err instanceof JsonMappingError) throw new HttpError(400, 'INVALID_ARGUMENT', err.message);
       throw err;
@@ -182,7 +195,12 @@ export class HttpGateway {
         (err, value) => (err ? reject(err) : resolve(value ?? {})),
       );
     });
-    this.send(res, 200, messageToJson(route.response, response));
+    const status = route.binding.successStatus;
+    if (status === 204) {
+      res.writeHead(204).end();
+      return;
+    }
+    this.send(res, status, messageToJson(route.response, response));
   }
 
   /** Reads and parses the JSON body, enforcing the size limit. */

@@ -1,0 +1,34 @@
+// Subset of googleapis' google/api/http.proto (Apache License 2.0,
+// https://github.com/googleapis/googleapis): the HttpRule used to map gRPC
+// methods to REST endpoints. Field numbers match the original, so these
+// annotations work unchanged with grpc-gateway, Envoy and Google tooling.
+syntax = "proto3";
+
+package google.api;
+
+message Http {
+  repeated HttpRule rules = 1;
+  bool fully_decode_reserved_expansion = 2;
+}
+
+message HttpRule {
+  string selector = 1;
+  oneof pattern {
+    string get = 2;
+    string put = 3;
+    string post = 4;
+    string delete = 5;
+    string patch = 6;
+    CustomHttpPattern custom = 8;
+  }
+  // "*" = the whole request message is the body; a field name = that field.
+  // Fields not in the path or body come from the query string.
+  string body = 7;
+  string response_body = 12;
+  repeated HttpRule additional_bindings = 11;
+}
+
+message CustomHttpPattern {
+  string kind = 1;
+  string path = 2;
+}

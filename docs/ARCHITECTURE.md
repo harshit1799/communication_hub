@@ -14,7 +14,7 @@ How the Communication Hub is built and why. Usage is in the [README](../README.m
                         (rows, configs,                       (BullMQ queues, config cache,
                          encrypted PII)                        rate limits, API keys)
                                                   ▲
-                                                  │  claim row, render, resolve sender +
+                                                  │  claim row, render, resolve providers
                                                   │  providers (cache), send with failover
                                        worker pods (APP_ROLE=worker, scale on queue depth)
                                                   │
@@ -44,8 +44,10 @@ How the Communication Hub is built and why. Usage is in the [README](../README.m
 
 ### 1b. HTTP/JSON gateway + Swagger, generated from the protos
 
-- `src/gateway`: `POST /api/v1/<Service>/<Method>` transcodes proto3 JSON to gRPC and calls the
-  **local gRPC server** as a client. One implementation, one pipeline: auth, rate limits,
+- REST routes are declared per RPC with the standard `google.api.http` annotation
+  (`get: "/v1/notifications/{id}"`, `body: "*"`, ...): GET for reads, POST for creates and
+  actions, PATCH for updates, DELETE for deletes. `src/gateway` binds path, query and body to
+  the request message (proto3 JSON) and calls the **local gRPC server** as a client. One implementation, one pipeline: auth, rate limits,
   validation, errors, logs and metrics are identical for HTTP and gRPC clients (cost: a
   loopback hop).
 - The OpenAPI 3 document is built at startup from the same `.proto` files (protobufjs
@@ -68,22 +70,25 @@ How the Communication Hub is built and why. Usage is in the [README](../README.m
   deleted on change; version content is immutable (long TTL, no invalidation); compiled
   templates sit in an in-process LRU keyed by version id.
 
-### 3. Senders as data, resolved at send time
+### 3. The "From" is a provider setting
 
-- `sender_identities` (many per channel, at most one default, enforced by a partial unique
-  index) and `sender_rules` (match any / recipient prefix / recipient domain, optionally per
-  template, by priority).
-- Resolution order: request → template rules → general rules → tenant default → provider
-  default. It runs in the **worker**, where the decrypted recipient is available and the
-  current rules apply. An explicitly requested sender that disappears fails the message
-  instead of silently using another identity (a compliance problem for SMS sender ids).
-- A sender can be **pinned to a provider config**: sender ids and numbers belong to vendor
-  accounts.
+- No separate sender entities: each provider config carries its `settings.from` (email
+  address or SMS sender id), and a send may override it with `from`. One concept for the
+  tenant to manage instead of three (providers, senders, sender rules).
+- Resolved per provider call in the worker (request `from` → `settings.from` → `MAIL_FROM`),
+  so in a failover chain each vendor sends as an identity verified with *that* vendor.
+- The format is validated (email / `Name <address>`; E.164, short code, alphanumeric id);
+  ownership is the vendor's job (SES identity, Twilio number, DLT registration).
+- Earlier versions had sender identities and sender rules (prefix / domain / template);
+  migration `1764` moved default senders into `settings.from` and dropped them.
 
-### 4. Providers per tenant from DB, read through Redis
+### 4. Providers per tenant from DB, read through Redis (tenant-managed)
 
-- `provider_configs` per tenant and channel: kind, non-secret `settings`, encrypted
-  `credentials`, `priority`, active flag. Validated per kind on write (`provider.factory.ts`).
+- `provider_configs` per tenant and channel: kind, non-secret `settings` (incl. `from`),
+  encrypted `credentials`, `priority`, active flag. Validated per kind on write
+  (`provider.factory.ts`). Managed by the **tenant** with its own key (`ProviderService`):
+  the admin only creates tenants and keys. Trade-off: a leaked tenant key can change the
+  tenant's providers; credentials are still never readable.
 - **Send path never hits Postgres in the steady state:** `providers:<tenant>:<channel>` in Redis
   (TTL `PROVIDER_CACHE_TTL_SECONDS`), DB on miss or Redis outage, platform default (env) when a
   tenant has none. Admin writes delete the key: changes apply to the next message on every
@@ -153,7 +158,8 @@ at-least-once.
 ## Migration notes (`1762000000000-templates-senders-providers`)
 
 - Creates the new tables, encrypts existing `recipient` / `data` in batches and fills
-  `recipient_hash`, moves `settings.emailFrom` / `smsFrom` to default senders, seeds the
+  `recipient_hash`, moves `settings.emailFrom` / `smsFrom` to default senders (since `1764`: to the providers'
+  `settings.from`), seeds the
   starter templates per tenant and links existing notifications to them.
 - `created_at` of `tenants`, `notifications` and `templates` becomes `timestamptz(3)`: the old
   microsecond values made cursor pagination skip rows created in the same millisecond (the
@@ -169,6 +175,5 @@ at-least-once.
   failover makes this correct but adds its latency until the config is deactivated).
 - Provider delivery receipts (SES/SNS events, Twilio status callbacks) to move from
   "accepted by vendor" to "delivered".
-- Tenant self-service for provider configs (today admin-only, by choice: a leaked tenant key
-  must not be able to redirect traffic to another vendor account).
+- Per-key scopes (e.g. a send-only key that can't change providers or templates).
 - Server-streaming `WatchNotification` for clients that want push instead of polling.

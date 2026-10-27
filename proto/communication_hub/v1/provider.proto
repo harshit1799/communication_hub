@@ -1,85 +1,153 @@
-// Per-tenant delivery provider configuration (admin key).
+// The tenant's delivery providers (tenant API key).
 //
-// Each tenant can have several providers per channel, tried in ascending
-// `priority` order: a transient failure on one fails over to the next.
-// Workers read this configuration from Redis (falling back to Postgres) at
-// send time, so changes apply within seconds and without a deployment.
-// A tenant without providers for a channel uses the platform default
-// (EMAIL_PROVIDER / SMS_PROVIDER / PUSH_PROVIDER).
+// A tenant configures any number of providers per channel: the vendor
+// (SES, Twilio, Firebase, ...), its credentials, the "From" it sends as,
+// and a priority. Sends try the active providers in ascending priority;
+// a transient failure on one fails over to the next. Workers read this
+// configuration from Redis (falling back to Postgres) at send time, so a
+// change applies to the next message, without a deployment. A channel
+// without providers uses the platform default (EMAIL_PROVIDER, ...).
 //
 // Credentials are encrypted at rest and never returned.
 //
-//   provider   settings                              credentials
-//   smtp       host, port, secure                    user, pass
-//   ses        region                                access_key_id, secret_access_key (optional)
-//   sendgrid   -                                     api_key
-//   twilio     from | messaging_service_sid          account_sid, auth_token
-//   sns        region, sender_id                     access_key_id, secret_access_key (optional)
-//   fcm        -                                     service_account (JSON)
-//   console    -                                     -   (logs only; local development)
+//   provider   settings                                   credentials
+//   smtp       host, port, secure, from                   user, pass
+//   ses        region, from                               access_key_id, secret_access_key (optional)
+//   sendgrid   from                                       api_key
+//   twilio     from | messaging_service_sid               account_sid, auth_token
+//   sns        region, from (sender id)                   access_key_id, secret_access_key (optional)
+//   fcm        -                                          service_account (JSON)
+//   console    from                                       -   (logs only; local development)
+//
+// From addresses:
+//   settings.from    the default "From" of the provider: email "Acme <no-reply@acme.com>",
+//                    SMS a number or sender id ("+14155550100", "ACMEIN")
+//   from_addresses   more named addresses on the same provider, e.g. one SMTP account
+//                    sending as { support: ..., billing: ..., alerts: ... }
+// A send picks one by name (NotificationInput.from = "billing"): only providers
+// that have that name are used, each sending as its own address for it.
 syntax = "proto3";
 
 package communication_hub.v1;
 
+import "google/api/annotations.proto";
 import "google/protobuf/empty.proto";
 import "google/protobuf/timestamp.proto";
 import "communication_hub/v1/common.proto";
 
-service ProviderAdminService {
-  rpc CreateProviderConfig(CreateProviderConfigRequest) returns (ProviderConfig);
-  rpc ListProviderConfigs(ListProviderConfigsRequest) returns (ListProviderConfigsResponse);
-  // Settings are merged; credentials, when given, replace the stored ones.
-  rpc UpdateProviderConfig(UpdateProviderConfigRequest) returns (ProviderConfig);
-  rpc DeleteProviderConfig(ProviderConfigRef) returns (google.protobuf.Empty);
+service ProviderService {
+  rpc CreateProvider(CreateProviderRequest) returns (Provider) {
+    option (google.api.http) = {
+      post: "/v1/providers"
+      body: "*"
+    };
+  }
+  rpc ListProviders(ListProvidersRequest) returns (ListProvidersResponse) {
+    option (google.api.http) = {
+      get: "/v1/providers"
+    };
+  }
+  rpc GetProvider(ProviderRef) returns (Provider) {
+    option (google.api.http) = {
+      get: "/v1/providers/{id}"
+    };
+  }
+  // Settings are merged ("" removes a key); credentials, when given, replace the stored ones.
+  rpc UpdateProvider(UpdateProviderRequest) returns (Provider) {
+    option (google.api.http) = {
+      patch: "/v1/providers/{id}"
+      body: "*"
+    };
+  }
+  rpc DeleteProvider(ProviderRef) returns (google.protobuf.Empty) {
+    option (google.api.http) = {
+      delete: "/v1/providers/{id}"
+    };
+  }
+  // Every From the tenant can send with: name -> address -> provider.
+  rpc ListFromAddresses(ListFromAddressesRequest) returns (ListFromAddressesResponse) {
+    option (google.api.http) = {
+      get: "/v1/from-addresses"
+    };
+  }
 }
 
-message ProviderConfig {
+message Provider {
   string id = 1;
-  string tenant_id = 2;
-  Channel channel = 3;
+  Channel channel = 2;
   // smtp | ses | sendgrid | twilio | sns | fcm | console
-  string provider = 4;
-  string name = 5;
-  int32 priority = 6;
-  bool active = 7;
-  map<string, string> settings = 8;
-  // Names of the stored credentials (values are never returned).
-  repeated string credential_keys = 9;
-  google.protobuf.Timestamp created_at = 10;
-  google.protobuf.Timestamp updated_at = 11;
-}
-
-message CreateProviderConfigRequest {
-  string tenant_id = 1;
-  Channel channel = 2;
   string provider = 3;
-  // Unique per tenant and channel, e.g. "ses-primary".
+  // Unique per channel, e.g. "ses-primary".
   string name = 4;
+  // Failover order: lower is tried first.
   int32 priority = 5;
-  map<string, string> settings = 6;
-  map<string, string> credentials = 7;
+  bool active = 6;
+  map<string, string> settings = 7;
+  // Names of the stored credentials (values are never returned).
+  repeated string credential_keys = 8;
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp updated_at = 10;
+  // Named From addresses: name (lowercase letters, digits, dashes) -> address.
+  map<string, string> from_addresses = 11;
 }
 
-message ListProviderConfigsRequest {
-  string tenant_id = 1;
-  Channel channel = 2;
-}
-
-message ListProviderConfigsResponse {
-  repeated ProviderConfig providers = 1;
-}
-
-message UpdateProviderConfigRequest {
-  string tenant_id = 1;
-  string id = 2;
-  optional string name = 3;
+message CreateProviderRequest {
+  Channel channel = 1;
+  string provider = 2;
+  string name = 3;
+  // Default 100.
   optional int32 priority = 4;
-  optional bool active = 5;
-  map<string, string> settings = 6;
-  map<string, string> credentials = 7;
+  map<string, string> settings = 5;
+  map<string, string> credentials = 6;
+  map<string, string> from_addresses = 7;
 }
 
-message ProviderConfigRef {
-  string tenant_id = 1;
-  string id = 2;
+message ListProvidersRequest {
+  // Unset = every channel.
+  Channel channel = 1;
+}
+
+message ListProvidersResponse {
+  // In failover order per channel.
+  repeated Provider providers = 1;
+}
+
+message ProviderRef {
+  string id = 1;
+}
+
+message UpdateProviderRequest {
+  string id = 1;
+  optional string name = 2;
+  optional int32 priority = 3;
+  optional bool active = 4;
+  map<string, string> settings = 5;
+  map<string, string> credentials = 6;
+  // Merged into the stored names ("" removes a name).
+  map<string, string> from_addresses = 7;
+}
+
+message ListFromAddressesRequest {
+  // Unset = email and SMS.
+  Channel channel = 1;
+}
+
+message FromAddress {
+  // The name to use as NotificationInput.from; unset for a provider's default (settings.from).
+  optional string name = 1;
+  string address = 2;
+  Channel channel = 3;
+  string provider_id = 4;
+  string provider_name = 5;
+  // smtp, ses, ...
+  string provider = 6;
+  // True for settings.from (used when a send names no From).
+  bool is_default = 7;
+  // False when the provider is disabled (the address is then not used).
+  bool active = 8;
+}
+
+message ListFromAddressesResponse {
+  // In failover order (provider priority).
+  repeated FromAddress from_addresses = 1;
 }

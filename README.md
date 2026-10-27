@@ -9,7 +9,9 @@ An HTTP/JSON gateway with **Swagger UI** exposes the same API to REST clients an
 trying things out in the browser.
 
 Built on NestJS 12 (gRPC transport), PostgreSQL (TypeORM) and Redis (BullMQ), monitored with
-Prometheus + Loki + Grafana. Design decisions: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Prometheus + Loki + Grafana. **New here? Follow [docs/API_GUIDE.md](docs/API_GUIDE.md)**: the
+complete flow from creating a tenant to a delivered notification, with request and response
+examples. Design decisions: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 | Channel | Providers (per tenant in the DB, or the platform default from `.env`) |
 | --- | --- |
@@ -28,7 +30,7 @@ runs locally without vendor credentials. It's rejected as platform default outsi
 4. [Sending a notification](#4-sending-a-notification): email, SMS, push, bulk
    - [In-app notifications (inbox + push)](#in-app-notifications-inbox--push)
 5. [Templates (stored in the database, versioned)](#5-templates)
-6. [Senders (several per channel, rules)](#6-senders)
+6. [The "From" (sender)](#6-the-from-sender)
 7. [Providers per tenant (DB + cache, failover)](#7-providers-per-tenant)
 8. [Encryption of recipient data](#8-encryption-of-recipient-data)
 9. [How sending works](#9-how-sending-works)
@@ -62,7 +64,7 @@ Or run the whole stack, monitoring included, in Docker: `docker compose up --bui
 | --- | --- |
 | gRPC API | `localhost:50051` (server reflection on locally: `grpcurl -plaintext localhost:50051 list`) |
 | **Swagger UI** (try every method) | http://localhost:3000/docs (OpenAPI JSON at `/docs/openapi.json`) |
-| HTTP/JSON API | `POST http://localhost:3000/api/v1/<Service>/<Method>` |
+| REST API | `http://localhost:3000/api/v1/...` (e.g. `GET /api/v1/notifications/{id}`) |
 | Liveness / readiness | http://localhost:9464/health/live, http://localhost:9464/health/ready |
 | Prometheus metrics | http://localhost:9464/metrics |
 | Grafana (compose) | http://localhost:3001 (admin / admin), dashboard **Communication Hub** |
@@ -72,7 +74,7 @@ On startup every connection logs its state (one JSON line each; pretty in develo
 ```
 Environment  APP_ENV=local: using .env and process environment
 Redis        Connected to localhost:6379/0 (cache, rate limits, API keys)
-PostgreSQL   Connected to localhost:5432/communication_hub (..., 2 migrations applied, latest TemplatesSendersProviders1762000000000)
+PostgreSQL   Connected to localhost:5432/communication_hub (..., 4 migrations applied, latest ProviderFromInsteadOfSenders1764000000000)
 BullMQ       Connected to localhost:6379/0; queues: notifications-email, notifications-sms, notifications-push, maintenance
 EmailProcessor  Worker started, consuming "notifications-email" (concurrency 20, rate limit 100 per 1000ms)
 Ops          Ops endpoints on :9464 (/health/live, /health/ready, /metrics)
@@ -90,11 +92,10 @@ never stored in clear), naming what is missing.
 | --- | --- | --- |
 | `NotificationService` | tenant `x-api-key` | send (single / bulk), get, list, retry, cancel |
 | `TemplateService` | tenant | create, version, activate / roll back, archive, preview templates |
-| `SenderService` | tenant | sender identities and sender rules |
 | `DeviceService` | tenant | push token registry |
 | `InboxService` | tenant | in-app inbox: list, unread count, mark read, delete |
 | `TenantAdminService` | admin `x-admin-key` | tenants, API keys |
-| `ProviderAdminService` | admin | per-tenant provider configs and credentials |
+| `ProviderService` | tenant | the tenant's providers: vendor, credentials, `from`, priority |
 | `grpc.health.v1.Health` | none | standard health check (Kubernetes gRPC probes) |
 
 **Metadata** (gRPC headers): `x-api-key` or `x-admin-key` (required), `x-request-id` (optional,
@@ -114,8 +115,8 @@ in any language.
 | `INVALID_ARGUMENT` | `VALIDATION_ERROR` (details names the field), `TEMPLATE_INVALID`, `TEMPLATE_RENDER_FAILED`, `PROVIDER_CONFIG_INVALID` |
 | `UNAUTHENTICATED` | `API_KEY_MISSING`, `API_KEY_INVALID`, `ADMIN_KEY_INVALID` |
 | `PERMISSION_DENIED` | `TENANT_INACTIVE`, `ADMIN_DISABLED` |
-| `NOT_FOUND` | `NOTIFICATION_NOT_FOUND`, `TEMPLATE_NOT_FOUND`, `TEMPLATE_VERSION_NOT_FOUND`, `SENDER_NOT_FOUND`, ... |
-| `ALREADY_EXISTS` | `TENANT_SLUG_TAKEN`, `TEMPLATE_NAME_TAKEN`, `SENDER_VALUE_TAKEN`, `PROVIDER_NAME_TAKEN` |
+| `NOT_FOUND` | `NOTIFICATION_NOT_FOUND`, `TEMPLATE_NOT_FOUND`, `TEMPLATE_VERSION_NOT_FOUND`, `PROVIDER_CONFIG_NOT_FOUND`, ... |
+| `ALREADY_EXISTS` | `TENANT_SLUG_TAKEN`, `TEMPLATE_NAME_TAKEN`, `PROVIDER_NAME_TAKEN` |
 | `FAILED_PRECONDITION` | `NOTIFICATION_NOT_RETRYABLE`, `NOTIFICATION_NOT_CANCELLABLE`, `TEMPLATE_ARCHIVED` |
 | `RESOURCE_EXHAUSTED` | `TOO_MANY_REQUESTS` (per-tenant rate limit; `retryAfterSeconds` in `error-data`) |
 | `UNAVAILABLE` / `INTERNAL` | infrastructure problems (logged server-side, never leaked) |
@@ -123,25 +124,52 @@ in any language.
 Rejected calls store nothing. Delivery problems are not RPC errors: they show up as
 `NOTIFICATION_STATUS_FAILED` with `error` and the attempt log on the notification.
 
-### HTTP/JSON and Swagger
+### REST API and Swagger
 
-Every RPC is also available as `POST /api/v1/<Service>/<Method>` on `HTTP_PORT` (3000), with a
-JSON body in the proto3 JSON format (enum names, RFC 3339 times, `data` as a plain object).
-Open **http://localhost:3000/docs**, click *Authorize*, paste the `x-api-key` (or `x-admin-key`)
-and use *Try it out* on any method.
+Every RPC is also a **REST endpoint** on `HTTP_PORT` (3000), under `/api`. Routes are declared
+next to each RPC in the protos with the standard `google.api.http` annotation (the same one
+grpc-gateway and Envoy use):
 
-```bash
-curl -X POST http://localhost:3000/api/v1/NotificationService/SendNotification \
-  -H 'Content-Type: application/json' -H 'x-api-key: <API_KEY>' \
-  -d '{ "notification": { "channel": "CHANNEL_SMS", "recipient": "+919876543210", "template": "otp", "data": { "code": "482913" } } }'
+```proto
+rpc GetNotification(NotificationRef) returns (NotificationDetails) {
+  option (google.api.http) = { get: "/v1/notifications/{id}" };
+}
 ```
 
-- The OpenAPI document is **generated from `proto/` at startup** (descriptions from the proto
-  comments), so it always matches the gRPC contract.
+| Resource | Endpoints |
+| --- | --- |
+| Notifications | `POST /api/v1/notifications` (send, **202**) · `POST /api/v1/notifications/bulk` (**202**) · `GET /api/v1/notifications` · `GET /api/v1/notifications/{id}` · `POST /api/v1/notifications/{id}/retry` · `POST /api/v1/notifications/{id}/cancel` |
+| Templates | `POST /api/v1/templates` · `GET /api/v1/templates` · `GET /api/v1/templates/{id}` · `POST /api/v1/templates/{template_id}/versions` · `GET /api/v1/templates/{id}/versions` · `POST /api/v1/templates/{template_id}/versions/{version}/activate` · `POST /api/v1/templates/{id}/archive` · `POST /api/v1/templates/{template_id}/preview` |
+| Devices | `POST /api/v1/devices` · `GET /api/v1/devices?user_id=` · `DELETE /api/v1/devices/{token}` |
+| Inbox | `GET /api/v1/users/{user_id}/inbox` · `GET /api/v1/users/{user_id}/inbox/unread-count` · `POST /api/v1/users/{user_id}/inbox/read` · `POST /api/v1/users/{user_id}/inbox/read-all` · `DELETE /api/v1/users/{user_id}/inbox/{id}` |
+| Admin: tenants | `POST/GET /api/v1/admin/tenants` · `GET/PATCH /api/v1/admin/tenants/{id}` · `POST /api/v1/admin/tenants/{tenant_id}/api-keys` · `GET /api/v1/admin/tenants/{id}/api-keys` · `DELETE /api/v1/admin/tenants/{tenant_id}/api-keys/{key_id}` |
+| Providers | `POST /api/v1/providers` · `GET /api/v1/providers` · `GET/PATCH/DELETE /api/v1/providers/{id}` |
+
+Conventions: **GET** reads (filters and pagination as query parameters, nested with dots:
+`?page.limit=20&page.cursor=...&status=NOTIFICATION_STATUS_FAILED`), **POST** creates (201;
+sends 202 because delivery is asynchronous) and actions (`/retry`, `/cancel`, `/archive`),
+**PATCH** partial updates, **DELETE** deletes (204 No Content). Bodies use the proto3 JSON
+format (enum names, RFC 3339 times, `data` as a plain object). Open
+**http://localhost:3000/docs**, click *Authorize*, paste the `x-api-key` (or `x-admin-key`)
+and use *Try it out*.
+
+```bash
+curl -X POST http://localhost:3000/api/v1/notifications \
+  -H 'Content-Type: application/json' -H 'x-api-key: <API_KEY>' \
+  -d '{ "channel": "CHANNEL_SMS", "recipient": "+919876543210", "template": "otp", "data": { "code": "482913" } }'
+
+curl 'http://localhost:3000/api/v1/notifications?status=NOTIFICATION_STATUS_FAILED&page.limit=20' -H 'x-api-key: <API_KEY>'
+```
+
+- Routes and the OpenAPI document are **generated from `proto/` at startup** (descriptions
+  from the proto comments), so they always match the gRPC contract.
 - The gateway forwards to the local gRPC server: same auth, rate limits, validation, errors,
   logs and metrics. It is not a second implementation.
 - Errors: HTTP status mapped from the gRPC code (400, 401, 403, 404, 409, 429, 503, ...) with
-  the body `{ "code", "type", "message", "data" }`; `x-request-id` is echoed.
+  the body `{ "code", "type", "message", "data" }`; a wrong verb gives 405 with `Allow`;
+  `x-request-id` is echoed.
+- Adding an endpoint = add the RPC with its `google.api.http` option, implement it with
+  `@GrpcMethod`; the REST route and its Swagger entry appear on the next start.
 - Swagger is on by default only locally (`SWAGGER_ENABLED`); `SWAGGER_USER` / `SWAGGER_PASS`
   add basic auth. `HTTP_PORT=0` turns the gateway off.
 
@@ -185,7 +213,7 @@ grpcurl -plaintext -H 'x-api-key: <API_KEY>' -H 'x-request-id: signup-42' -d '{
 
 The response is the stored notification (`NOTIFICATION_STATUS_QUEUED`, `templateVersion` pinned)
 and `replayed`. **Delivery is asynchronous**: read the outcome with `GetNotification` (status,
-provider, provider message id, every attempt incl. sender and failovers).
+provider, provider message id, every attempt incl. the "From" used and failovers).
 
 | Channel | `recipient` | Content |
 | --- | --- | --- |
@@ -193,7 +221,7 @@ provider, provider message id, every attempt incl. sender and failovers).
 | SMS | **E.164** (`+919876543210`) | `template` or `body`; no `subject` |
 | Push | device token, **or** `userId` (all devices of the user, max 50) | `template` or `body`; `subject` = title; `metadata` = FCM data payload |
 
-Other fields: `templateVersion` (pin a version), `senderId` (choose the sender, [section 6](#6-senders)),
+Other fields: `templateVersion` (pin a version), `from` (override the provider's "From", [section 6](#6-the-from-sender)),
 `data` (template values: stored encrypted), `metadata` (your references), `priority`
 (default `NORMAL` single / `LOW` bulk, use `HIGH` for OTPs), `scheduledAt` (up to 30 days),
 `idempotencyKey` (a repeated key returns the original, `replayed: true`, nothing sent twice).
@@ -298,67 +326,59 @@ are copied from `src/views/` into every new tenant; after that they are ordinary
 
 ---
 
-## 6. Senders
+## 6. The "From" (sender)
 
-A template no longer has one fixed `emailFrom` / `smsFrom`. Each tenant registers **any
-number of senders** per channel (`SenderService/CreateSender`): email addresses
-(`"Acme Support <support@acme.com>"`) and SMS sender ids / numbers (`"+14155550100"`,
-`"ACME"`). For each notification the worker picks:
+There is no separate sender object. The "From" is part of the **provider** the tenant
+configures (`settings.from`), so each provider sends as its own verified identity:
 
-1. `senderId` from the request, if given (validated at accept time; if it is deactivated
-   before delivery the notification fails instead of silently using another sender);
-2. the first matching **sender rule**: rules for the notification's template first, then
-   general rules, each by ascending `priority`:
+| Channel | `settings.from` example | Recipient sees |
+| --- | --- | --- |
+| Email | `Acme Support <support@acme.com>` | **Acme Support**; replies go to `support@acme.com` |
+| SMS | `+14155550100`, `56789` (short code), `ACMEIN` (alphanumeric id) | that number / name |
 
-   | Match | Example |
-   | --- | --- |
-   | `SENDER_RULE_MATCH_RECIPIENT_PREFIX` | `+91` → the DLT-registered Indian sender id |
-   | `SENDER_RULE_MATCH_RECIPIENT_DOMAIN` | `gmail.com` → a dedicated From address |
-   | `SENDER_RULE_MATCH_ANY` (+ `templateId`) | "invoices send from billing@" |
-
-3. the tenant's **default** sender for the channel (one per channel, `isDefault`);
-4. otherwise the provider's own default (`MAIL_FROM` for the platform email provider, a
-   Twilio Messaging Service, ...).
-
-A sender can be **pinned to a provider config** (`providerConfigId`), e.g. a number that only
-exists in one Twilio account: that provider is then tried first. The sender used is recorded
-on every attempt. Senders must be verified with the provider (SES identity, Twilio number,
-DLT registration); the hub does not verify ownership. Existing `settings.emailFrom` /
-`smsFrom` values were migrated to default senders.
+A provider can also have **named From addresses** (`fromAddresses`), e.g. one SMTP account
+sending as `{ "support": ..., "billing": ..., "alerts": ... }`. A send picks one by name
+(`"from": "billing"`): only providers that have that name are used, each sending as its own
+address for it; an unknown name is rejected (`404 FROM_NOT_FOUND`). `from` can also be a full
+address; without it each provider uses `settings.from` (then `MAIL_FROM` / the vendor default).
+`GET /api/v1/from-addresses` lists every name → address → provider; each notification records
+`sentFrom` and `providerName`, each attempt the provider name and the From it used. The
+format is validated (email address or `Name <address>`; E.164 number, short code or 3-11
+character alphanumeric id); the address itself must be **verified with the vendor**.
 
 ---
 
 ## 7. Providers per tenant
 
-Provider selection is data, not code. `ProviderAdminService` stores per tenant and channel
-any number of **provider configs**: provider kind, settings, **encrypted credentials** and
-`priority`:
+Provider selection is data, not code, and the **tenant manages it with its own API key**
+(`ProviderService`, `/api/v1/providers`): any number of providers per channel, each with its
+vendor, settings (incl. `from`), **encrypted credentials** and `priority`:
 
 ```bash
-grpcurl -plaintext -H 'x-admin-key: <ADMIN_API_KEY>' -d '{
-  "tenantId": "<tenant>", "channel": "CHANNEL_SMS", "provider": "twilio", "name": "twilio-main", "priority": 1,
-  "settings": { "messaging_service_sid": "MG..." },
+curl -X POST http://localhost:3000/api/v1/providers -H 'Content-Type: application/json' -H 'x-api-key: <API_KEY>' -d '{
+  "channel": "CHANNEL_SMS", "provider": "twilio", "name": "twilio-main", "priority": 1,
+  "settings": { "messaging_service_sid": "MG...", "from": "ACMEIN" },
   "credentials": { "account_sid": "AC...", "auth_token": "..." }
-}' localhost:50051 communication_hub.v1.ProviderAdminService/CreateProviderConfig
+}'
 ```
 
 | Provider | `settings` | `credentials` |
 | --- | --- | --- |
-| `smtp` | `host`*, `port`, `secure` | `user`, `pass` |
-| `ses` | `region`* | `access_key_id`, `secret_access_key` (optional: IAM role) |
-| `sendgrid` | | `api_key`* |
+| `smtp` | `host`*, `port`, `secure`, `from` | `user`, `pass` |
+| `ses` | `region`*, `from` | `access_key_id`, `secret_access_key` (optional: IAM role) |
+| `sendgrid` | `from` | `api_key`* |
 | `twilio` | `from`, `messaging_service_sid` | `account_sid`*, `auth_token`* |
-| `sns` | `region`*, `sender_id` | `access_key_id`, `secret_access_key` (optional) |
+| `sns` | `region`*, `from` (sender id) | `access_key_id`, `secret_access_key` (optional) |
 | `fcm` | | `service_account`* (JSON) |
-| `console` | | |
+| `console` | `from` | |
 
 (* required; configs are validated per kind before they are stored; credentials are never
-returned, only `credentialKeys`.)
+returned, only `credentialKeys`. `GET/PATCH/DELETE /api/v1/providers/{id}`, `GET /api/v1/providers?channel=`.)
 
 **At send time** the worker reads the tenant's active configs from **Redis**
 (`providers:<tenant>:<channel>`, `PROVIDER_CACHE_TTL_SECONDS`), falling back to Postgres when
 the key is missing or Redis is down, and to the **platform default** (`EMAIL_PROVIDER`,
-`SMS_PROVIDER`, `PUSH_PROVIDER` in `.env`) when the tenant has none. Every admin change deletes
+`SMS_PROVIDER`, `PUSH_PROVIDER` in `.env`) when the tenant has none. Every change deletes
 the cache key, so it applies to the **next message**, on every worker, without a restart.
 
 **Failover:** providers are tried in `priority` order. A transient error (timeout, 5xx,
@@ -401,7 +421,7 @@ reused; a changed config gets a new client and the old one is closed.
  │ 2 AuthGuard         API key → tenant (Redis cache, Postgres fallback)       │
  │ 3 RateLimitGuard    per-tenant budget, counted in Redis                     │
  │ 4 Controller        proto → DTO, validation per channel                     │
- │ 5 Service           template → pinned version, sender check, placeholders   │
+ │ 5 Service           template → pinned version, placeholders, From format    │
  │ 6 Postgres          INSERT … ON CONFLICT DO NOTHING  (recipient/data encrypted) │
  │ 7 Redis / BullMQ    job { notificationId, requestId } → "notifications-<channel>" │
  └───────────────────────────── response: QUEUED ──────────────────────────────┘
@@ -409,8 +429,8 @@ reused; a changed config gets a new client and the old one is closed.
  ┌──────────────────────── Worker (background) ───────────────────────────────┐
  │ 8  Claim      queued → processing, attempts + 1 (skips if already sent)     │
  │ 9  Render     pinned template version + inline text, tenant branding        │
- │ 10 Sender     request → rule → tenant default   (SenderResolver, cached)    │
- │ 11 Providers  tenant configs by priority → platform default (cached)        │
+ │ 11 Providers  tenant configs by priority → platform default (cached);       │
+ │               From = request `from` → provider settings.from → MAIL_FROM    │
  │ 12 Send       provider 1 → (transient) provider 2 → …                       │
  │ 13 Record     sent / retrying / failed, one attempt row per provider call,  │
  │               one structured log line, Prometheus counters                  │
@@ -422,7 +442,7 @@ reused; a changed config gets a new client and the old one is closed.
 | 1–3 | `src/grpc/rpc-context.ts`, `src/auth/auth.guard.ts`, `src/auth/rate-limit.guard.ts` |
 | 4 | `src/modules/notification/notification.controller.ts`, `src/grpc/codecs.ts`, `src/dto/` |
 | 5–7 | `notification.service.ts`, `notification.repository.ts`, `notification.queue.ts` |
-| 8–13 | `notification.processor.ts` → `notification.dispatcher.ts` → `modules/sender/`, `modules/provider/`, `src/utils/<email\|sms\|firebase>/` |
+| 8–13 | `notification.processor.ts` → `notification.dispatcher.ts` → `modules/provider/`, `src/utils/<email\|sms\|firebase>/` |
 
 **Error classification** (per provider): SMTP `5xx` / rejected envelope, SES `MessageRejected`,
 SendGrid `4xx` (not 429), Twilio 21211/21214/21408/21610/21612/21614/21617, SNS invalid
@@ -430,8 +450,8 @@ parameter / opted out, FCM invalid payload are **permanent** (fail now). Everyth
 (timeouts, 4xx SMTP, 429, 5xx, network) is **transient** (fail over, then retry with backoff).
 
 > **Gmail SMTP note:** Gmail replaces the From address with the logged-in account unless it is
-> a verified *Send mail as* alias, so sender identities don't apply; use SES or SendGrid with
-> verified domains for per-tenant senders. Gmail also caps sending at ~500 emails/day.
+> a verified *Send mail as* alias, so `from` doesn't apply; use SES or SendGrid with
+> verified domains for per-tenant From addresses. Gmail also caps sending at ~500 emails/day.
 
 ---
 
@@ -501,7 +521,7 @@ All variables are listed in `.env.example` and validated at startup
 | gRPC / ops | `GRPC_PORT` (50051), `GRPC_MAX_MESSAGE_BYTES`, `GRPC_REFLECTION` (default on locally only), `OPS_PORT` (9464, 0 = off) |
 | HTTP gateway / Swagger | `HTTP_PORT` (3000, 0 = off), `BODY_LIMIT_BYTES`, `SWAGGER_ENABLED` (default on locally only), `SWAGGER_PATH`, `SWAGGER_USER`, `SWAGGER_PASS` |
 | Encryption | `ENCRYPTION_KEYS` (required), `ENCRYPTION_ACTIVE_KEY`, `BLIND_INDEX_KEY` (required) |
-| Caches | `PROVIDER_CACHE_TTL_SECONDS`, `SENDER_CACHE_TTL_SECONDS`, `TEMPLATE_CACHE_TTL_SECONDS` (300), `API_KEY_CACHE_TTL_SECONDS` (60) |
+| Caches | `PROVIDER_CACHE_TTL_SECONDS`, `TEMPLATE_CACHE_TTL_SECONDS` (300), `API_KEY_CACHE_TTL_SECONDS` (60) |
 | Auth & limits | `ADMIN_API_KEY` (≥ 32 chars; required outside local), `THROTTLE_LIMIT`, `THROTTLE_TTL_SECONDS` |
 | Bootstrap tenant | `BOOTSTRAP_TENANT_NAME`, `BOOTSTRAP_TENANT_SLUG`, `BOOTSTRAP_TENANT_API_KEY` |
 | PostgreSQL | `DB_HOST`, `DB_PORT`, `DB_USERNAME`, `DB_PASSWORD` (required), `DB_NAME`, `DB_SSL`, `DB_LOGGING`, `DB_POOL_SIZE` |
@@ -552,13 +572,13 @@ The secret is a JSON object with the same variables as `.env.example`, **includi
 | A vendor is down | **Failover** to the tenant's next provider within the attempt, then retries with exponential backoff and jitter (`QUEUE_ATTEMPTS`, `QUEUE_BACKOFF_MS`) |
 | Errors retrying can't fix | `PermanentDeliveryError`: failed at once, no failover, no retries |
 | Template changed mid-flight | The version is pinned at accept time; retries render the same content |
-| Configuration changes | Provider / sender / template caches are deleted on change (next message sees it); TTLs bound staleness if an invalidation is lost |
+| Configuration changes | Provider / template caches are deleted on change (next message sees it); TTLs bound staleness if an invalidation is lost |
 | Campaign vs. OTP | One queue per channel with priorities: `HIGH` jumps everything queued; bulk defaults to `LOW` |
 | Crash between DB write and queue push | The row is committed first and the call still succeeds. The **sweeper** (`maintenance` queue, every 60 s, once cluster-wide) re-queues idle in-flight rows, so delivery happens within ~3 minutes, never twice |
 | Worker crash mid-job | BullMQ stalled-job recovery; workers claim rows with a conditional update, so redelivery never resends a sent message |
-| Redis down | API keys, providers, senders and templates fall back to Postgres; the rate limiter fails open; connections recover on their own |
+| Redis down | API keys, providers and templates fall back to Postgres; the rate limiter fails open; connections recover on their own |
 | Deploys (SIGTERM) | gRPC graceful shutdown; `worker-lifecycle.ts` lets in-flight sends finish and record their result before connections close (15 s force-close, 25 s process deadline) |
-| Audit | Every provider call is a `notification_attempts` row (provider, sender, error, duration) |
+| Audit | Every provider call is a `notification_attempts` row (provider, From used, error, duration) |
 
 Delivery is **at-least-once**: if a provider accepted a message but the process died before
 recording it, it will be sent again.
@@ -574,7 +594,7 @@ The easiest way is a broken provider config for a test tenant, no restarts neede
 
 ```bash
 # Transient: SMTP refuses connections → retrying ×4 → failed after 5 attempts
-... ProviderAdminService/CreateProviderConfig '{ "tenantId": "...", "channel": "CHANNEL_EMAIL",
+... ProviderService/CreateProvider '{ "channel": "CHANNEL_EMAIL",
     "provider": "smtp", "name": "down", "priority": 1, "settings": { "host": "127.0.0.1", "port": "1" } }'
 # Failover: add a second config ("provider": "console", "priority": 2): the next email fails
 # over within the same attempt; GetNotification shows both provider calls.
@@ -591,7 +611,7 @@ SELECT attempt, provider, sender, success, permanent, error, duration_ms FROM no
 
 Automated suites: `npm test` (unit) and `npm run test:e2e` (real Postgres + Redis over gRPC:
 `app`, `http-gateway` (Swagger + JSON transcoding), `in-app` (inbox delivery, signals, read state, purge), `delivery-guarantees` (idempotency, priority, retries, crash recovery), `tenant-config`
-(template versioning, sender rules, provider failover and cache invalidation, encryption,
+(template versioning, From per provider / per send, provider failover and cache invalidation, encryption,
 health), `base-repository`).
 
 ---
@@ -606,10 +626,9 @@ pending migrations on startup; workers never migrate. Start from an **empty** da
 | `tenants` | Clients, branding, active flag |
 | `api_keys` | Hashed keys per tenant (rotation, expiry, revocation, last use) |
 | `templates` / `template_versions` | Named templates per tenant and channel; immutable versions, one active |
-| `sender_identities` / `sender_rules` | Senders per tenant and channel (one default), selection rules |
-| `provider_configs` | Provider kind, settings, encrypted credentials, priority per tenant and channel |
+| `provider_configs` | Provider kind, settings (incl. `from`), encrypted credentials, priority per tenant and channel |
 | `notifications` | One row per message: encrypted recipient + data, blind index, pinned template version, status, provider |
-| `notification_attempts` | One row per provider call (sender, success, permanent, error, `duration_ms`) |
+| `notification_attempts` | One row per provider call (From used as `sender`, success, permanent, error, `duration_ms`) |
 | `device_tokens` | Push tokens per tenant user |
 | `inbox_messages` | In-app inbox per user (one per notification, read state, expiry) |
 
@@ -642,7 +661,8 @@ to `src/database/postgres/migrations/index.ts`.
 
 ```
 proto/
-  communication_hub/v1/   the API contract: notification, template, sender, provider, tenant, device
+  communication_hub/v1/   the API contract (+ REST routes): notification, template, provider, tenant, device, inbox
+  google/api/             google.api.http annotation definitions
   grpc/health/v1/         standard gRPC health protocol
 observability/            prometheus (scrape + alerts), loki, promtail, grafana (datasources, dashboard)
 docs/ARCHITECTURE.md      design decisions
@@ -650,7 +670,7 @@ src/
   main.ts                 entry: gRPC server (api/all) or workers only (worker), by APP_ROLE
   app.module.ts           config, JSON logging with request context, i18n, infra, features, global guards/filter
   grpc/                   server options, proto codecs, validation, request context, error → status mapping
-  gateway/                HTTP/JSON gateway + Swagger UI (OpenAPI generated from proto/)
+  gateway/                REST gateway (routes from google.api.http annotations) + Swagger UI
   auth/                   AuthGuard (tenant / admin / public via metadata), per-tenant RateLimitGuard
   bootstrap/              startup tasks: sweeper schedule, bootstrap tenant
   config/                 typed config, env validation, environment.ts (.env + Secrets Manager)
@@ -662,7 +682,6 @@ src/
   modules/
     notification/         gRPC controller, service, repositories, queue, dispatcher (failover), workers, sweeper
     template/             DB templates: versions, activation, preview, starter templates
-    sender/               sender identities, rules, SenderResolver
     provider/             provider configs (admin), factory, registry (client pool), resolver (cache)
     tenant/               tenants, API keys (admin)
     device/               push token registry
@@ -678,7 +697,7 @@ src/
     template/             Handlebars renderer (compiled-version LRU)
     request-context.ts    AsyncLocalStorage request context for logs
     secretManager.ts      fetchSecrets() from AWS Secrets Manager
-  validator/              channel-aware validation rules (recipients, senders)
+  validator/              channel-aware validation rules (recipients, From values)
   views/                  starter template content
 ```
 
@@ -692,7 +711,7 @@ src/
 - `:9464` reachable from the cluster only (kubelet, Prometheus), never public.
 - `APP_ROLE=api` and `APP_ROLE=worker` as separate deployments. Liveness `:9464/health/live`;
   readiness `:9464/health/ready` or a gRPC probe; HPA for workers on queue depth.
-- Real platform default providers; tenant senders verified with their vendors;
+- Real platform default providers; tenants' From addresses verified with their vendors;
   `<CHANNEL>_RATE_MAX` set to vendor limits.
 - Redis with persistence (AOF) and `maxmemory-policy noeviction` (BullMQ requirement).
 - Loki with object storage and Alertmanager routing for the alert rules.

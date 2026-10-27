@@ -18,7 +18,8 @@ describe('SendNotificationDto', () => {
     [{ channel: 'email', recipient: 'jane@example.com', subject: 's', template: 'welcome' }],
     // Templates carry their own subject.
     [{ channel: 'email', recipient: 'jane@example.com', template: 'welcome', templateVersion: 2 }],
-    [{ channel: 'sms', recipient: '+14155550123', template: 'otp', senderId: '7d3f4b6e-2f7a-4c43-9d1e-2a9a3c1b5e10' }],
+    [{ channel: 'sms', recipient: '+14155550123', template: 'otp', from: 'ACMEIN' }],
+    [{ channel: 'email', recipient: 'a@b.com', subject: 's', body: 'b', from: 'Acme Billing <billing@acme.com>' }],
     [{ channel: 'sms', recipient: '+14155550123', body: 'b' }],
     [{ channel: 'push', recipient: 'device-token', body: 'b' }],
     [{ channel: 'push', userId: 'u-1', body: 'b' }],
@@ -40,7 +41,8 @@ describe('SendNotificationDto', () => {
     [{ channel: 'in_app', userId: 'u-1', recipient: 'x', body: 'b' }, 'not used for CHANNEL_IN_APP'],
     [{ channel: 'email', recipient: 'a@b.com', subject: 's', template: '../etc/passwd' }, 'template'],
     [{ channel: 'email', recipient: 'a@b.com', template: 'otp', templateVersion: 0 }, 'templateVersion'],
-    [{ channel: 'sms', recipient: '+14155550123', body: 'b', senderId: 'not-a-uuid' }, 'senderId'],
+    [{ channel: 'sms', recipient: '+14155550123', body: 'b', from: 'bad sender!' }, 'E.164'],
+    [{ channel: 'push', recipient: 'tok', body: 'b', from: 'x@y.com' }, 'from is only supported'],
     [{ channel: undefined, recipient: 'a@b.com', body: 'b' }, 'CHANNEL_EMAIL'],
   ])('rejects %j', (body, expected) => {
     expect(errorsFor(body).join(' ')).toContain(expected);

@@ -198,10 +198,6 @@ class EnvironmentVariables {
 
   @IsInt()
   @Min(1)
-  SENDER_CACHE_TTL_SECONDS: number = 300;
-
-  @IsInt()
-  @Min(1)
   TEMPLATE_CACHE_TTL_SECONDS: number = 300;
 
   @IsIn(BOOLEAN)

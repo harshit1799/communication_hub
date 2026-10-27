@@ -17,6 +17,8 @@ export interface ProviderSpec {
   name: string;
   priority: number;
   settings: Record<string, string>;
+  // Named From addresses (name -> address).
+  fromAddresses: Record<string, string>;
   // Ciphertext (FieldCipher); null for the platform default (env config).
   credentials: string | null;
   // Changes whenever the config changes: a new version gets a new client.

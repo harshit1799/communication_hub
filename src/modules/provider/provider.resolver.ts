@@ -6,8 +6,8 @@
  *     miss / Redis down -> Postgres (active configs by priority)
  *   none configured -> the platform default from the environment
  *
- * A sender pinned to one provider config moves that config to the front.
- * Admin changes delete the cache key, so they apply to the next message.
+ * Every change through ProviderService deletes the cache key, so it applies
+ * to the next message.
  */
 
 import { Injectable } from '@nestjs/common';
@@ -18,7 +18,7 @@ import { RedisService } from '../../utils/redis/redis.service.js';
 import { platformProviders, PlatformProvider } from './platform-providers.js';
 import { ProviderConfigRepository } from './provider-config.repository.js';
 import { ProviderRegistry } from './provider.registry.js';
-import type { ProviderHandle, ProviderSpec } from './provider.types.js';
+import type { ProviderHandle } from './provider.types.js';
 
 @Injectable()
 export class ProviderResolver {
@@ -36,11 +36,8 @@ export class ProviderResolver {
     this.platform = platformProviders(app);
   }
 
-  /**
-   * Providers for this tenant and channel in failover order (never empty).
-   * `preferredConfigId` (a sender's pinned provider) goes first if active.
-   */
-  async resolve(tenantId: string, notificationChannel: NotificationChannel, preferredConfigId?: string | null): Promise<ProviderHandle[]> {
+  /** Providers for this tenant and channel in failover order (never empty). */
+  async resolve(tenantId: string, notificationChannel: NotificationChannel): Promise<ProviderHandle[]> {
     // In-app signals devices through the push providers.
     const channel = providerChannelOf(notificationChannel);
     const specs = await this.redis.cached(REDIS_KEY.providers(tenantId, channel), this.ttl, () =>
@@ -50,8 +47,7 @@ export class ProviderResolver {
       const { spec, credentials } = this.platform[channel];
       return [{ spec, client: () => this.registry.get(spec, credentials) }];
     }
-    const ordered = preferredConfigId ? this.preferFirst(specs, preferredConfigId) : specs;
-    return ordered.map((spec) => ({ spec, client: () => this.registry.get(spec) }));
+    return specs.map((spec) => ({ spec, client: () => this.registry.get(spec) }));
   }
 
   /** The platform default's provider name for a channel (attempt records before resolution). */
@@ -64,8 +60,4 @@ export class ProviderResolver {
     return this.redis.invalidate(REDIS_KEY.providers(tenantId, channel));
   }
 
-  private preferFirst(specs: ProviderSpec[], id: string): ProviderSpec[] {
-    const preferred = specs.find((s) => s.id === id);
-    return preferred ? [preferred, ...specs.filter((s) => s !== preferred)] : specs;
-  }
 }

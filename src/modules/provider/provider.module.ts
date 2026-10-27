@@ -1,5 +1,5 @@
 /**
- * Provider module: per-tenant provider configs (admin gRPC service) and the
+ * Provider module: the tenant's provider configs (ProviderService) and the
  * send-path pieces the workers use (ProviderResolver + ProviderRegistry).
  */
 

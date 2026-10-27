@@ -35,7 +35,6 @@ const CODE_BY_STATUS: Record<number, GrpcStatus> = {
 const ALREADY_EXISTS = new Set([
   ERROR.TENANT_SLUG_TAKEN.type,
   ERROR.TEMPLATE_NAME_TAKEN.type,
-  ERROR.SENDER_VALUE_TAKEN.type,
   ERROR.PROVIDER_NAME_TAKEN.type,
 ]);
 

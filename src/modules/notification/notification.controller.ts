@@ -24,6 +24,7 @@ import {
 import { validateInput } from '../../grpc/validate.js';
 import { Notification, NotificationAttempt } from '../../models/index.js';
 import { RequestContextStore } from '../../utils/request-context.js';
+import type { QueueSnapshot } from './notification.queue.js';
 import { NotificationService } from './notification.service.js';
 
 const SERVICE = 'NotificationService';
@@ -42,7 +43,7 @@ interface ProtoNotificationInput {
   priority?: string;
   scheduledAt?: ProtoTimestamp;
   idempotencyKey?: string;
-  senderId?: string;
+  from?: string;
   alsoPush?: boolean;
 }
 
@@ -78,7 +79,9 @@ export function toProtoNotification(n: Notification) {
     provider: n.provider,
     providerMessageId: n.providerMessageId,
     error: n.error,
-    senderId: n.senderId,
+    from: n.fromAddress,
+    sentFrom: n.sentFrom,
+    providerName: n.providerName,
     alsoPush: n.alsoPush ?? false,
     scheduledAt: Timestamp.encode(n.scheduledAt),
     sentAt: Timestamp.encode(n.sentAt),
@@ -87,11 +90,27 @@ export function toProtoNotification(n: Notification) {
   });
 }
 
+/** Domain -> proto QueueInfo (omitted when the queue couldn't be read). */
+const toProtoQueue = (q: QueueSnapshot | null) =>
+  q
+    ? compact({
+        queue: q.queue,
+        jobId: q.jobId,
+        state: q.state,
+        priority: q.priority,
+        attemptsMade: q.attemptsMade,
+        maxAttempts: q.maxAttempts,
+        runAt: Timestamp.encode(q.runAt),
+      })
+    : undefined;
+
 const toProtoAttempt = (a: NotificationAttempt) =>
   compact({
     attempt: a.attempt,
     provider: a.provider,
     sender: a.sender,
+    providerName: a.providerName,
+    providerId: a.providerConfigId,
     success: a.success,
     providerMessageId: a.providerMessageId,
     error: a.error,
@@ -107,8 +126,13 @@ export class NotificationController {
   @GrpcMethod(SERVICE, 'SendNotification')
   async send(@Payload() req: { notification?: ProtoNotificationInput }, @CurrentTenant() tenant: TenantContext) {
     const dto = validateInput(SendNotificationDto, decodeInput(req.notification));
-    const { notification, replayed } = await this.notifications.send(tenant.tenantId, dto, this.requestId());
-    return { notification: toProtoNotification(notification), replayed };
+    const { notification, replayed, attempts, queue } = await this.notifications.send(tenant.tenantId, dto, this.requestId());
+    return compact({
+      notification: toProtoNotification(notification),
+      replayed,
+      attempts: attempts.map(toProtoAttempt),
+      queue: toProtoQueue(queue),
+    });
   }
 
   @GrpcMethod(SERVICE, 'SendBulkNotifications')
@@ -119,13 +143,14 @@ export class NotificationController {
       accepted: results.length,
       replayed: results.filter((r) => r.replayed).length,
       notifications: results.map((r) => toProtoNotification(r.notification)),
+      queues: results.map((r) => toProtoQueue(r.queue) ?? {}),
     };
   }
 
   @GrpcMethod(SERVICE, 'GetNotification')
   async get(@Payload() req: { id?: string }, @CurrentTenant() tenant: TenantContext) {
-    const n = await this.notifications.findOne(tenant.tenantId, validateInput(NotificationIdDto, req).id);
-    return { notification: toProtoNotification(n), attempts: (n.attemptLog ?? []).map(toProtoAttempt) };
+    const { notification: n, queue } = await this.notifications.findOne(tenant.tenantId, validateInput(NotificationIdDto, req).id);
+    return compact({ notification: toProtoNotification(n), attempts: (n.attemptLog ?? []).map(toProtoAttempt), queue: toProtoQueue(queue) });
   }
 
   @GrpcMethod(SERVICE, 'ListNotifications')

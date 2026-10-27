@@ -44,7 +44,14 @@ export class NotificationAttempt {
   @Column({ type: 'varchar', length: 30 })
   provider: string;
 
-  // Sender used (email "From" / SMS sender id), null when none applied.
+  // Provider config used: its name ("smtp-main") and id ("platform:email" for the platform default).
+  @Column({ name: 'provider_name', type: 'varchar', length: 100, nullable: true })
+  providerName: string | null;
+
+  @Column({ name: 'provider_config_id', type: 'varchar', length: 64, nullable: true })
+  providerConfigId: string | null;
+
+  // "From" used (email address / SMS sender id), null when none applied.
   @Column({ type: 'varchar', length: 255, nullable: true })
   sender: string | null;
 

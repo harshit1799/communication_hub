@@ -10,7 +10,6 @@ import {
   NotificationChannel,
   NotificationPriority,
   NotificationStatus,
-  SenderRuleMatch,
 } from '../constant/index.js';
 
 /**
@@ -37,7 +36,6 @@ export const ChannelCodec = protoEnum('CHANNEL', NotificationChannel);
 export const StatusCodec = protoEnum('NOTIFICATION_STATUS', NotificationStatus);
 export const PriorityCodec = protoEnum('PRIORITY', NotificationPriority);
 export const PlatformCodec = protoEnum('DEVICE_PLATFORM', DevicePlatform);
-export const SenderMatchCodec = protoEnum('SENDER_RULE_MATCH', SenderRuleMatch);
 
 /** google.protobuf.Timestamp as proto-loader represents it (longs: String). */
 export interface ProtoTimestamp {

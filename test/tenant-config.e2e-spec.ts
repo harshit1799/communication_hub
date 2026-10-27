@@ -2,7 +2,7 @@
  * Tenant-managed configuration end to end, over gRPC:
  *
  *   1. Templates live in the database and are versioned without deployments
- *   2. Several senders per channel, chosen at send time or by rule
+ *   2. The "From": provider settings.from, overridable per send
  *   3. Providers per tenant from the DB (via the Redis cache), with failover
  *   4. Standard gRPC health checking
  */
@@ -21,8 +21,7 @@ describe('Tenant configuration (e2e)', () => {
 
   const send = (notification: object) => hub.call('NotificationService', 'SendNotification', { notification }, hub.tenant(tenant.key));
   const tpl = (method: string, req: object) => hub.call('TemplateService', method, req, hub.tenant(tenant.key));
-  const senders = (method: string, req: object) => hub.call('SenderService', method, req, hub.tenant(tenant.key));
-  const providers = (method: string, req: object) => hub.call('ProviderAdminService', method, req, hub.admin());
+  const providers = (method: string, req: object) => hub.call('ProviderService', method, req, hub.tenant(tenant.key));
   const delivered = async (notification: object) => hub.waitForFinal(tenant.key, (await send(notification)).notification.id);
 
   beforeAll(async () => {
@@ -96,46 +95,64 @@ describe('Tenant configuration (e2e)', () => {
     });
   });
 
-  describe('2. Multiple senders, chosen at send time or by rule', () => {
-    let support: Msg;
-    let vip: Msg;
+  describe('2. The From: provider settings.from, overridable per send', () => {
+    let provider: Msg;
+    const email = (extra: object = {}) => ({ channel: 'CHANNEL_EMAIL', recipient: 'jane@example.com', subject: 'Hi', body: 'Hello', ...extra });
 
     beforeAll(async () => {
-      support = await senders('CreateSender', { channel: 'CHANNEL_EMAIL', value: 'Acme Support <support@acme.test>', isDefault: true });
-      vip = await senders('CreateSender', { channel: 'CHANNEL_EMAIL', value: 'Acme VIP <vip@acme.test>' });
-      await senders('CreateSenderRule', {
+      provider = await providers('CreateProvider', {
         channel: 'CHANNEL_EMAIL',
-        match: 'SENDER_RULE_MATCH_RECIPIENT_DOMAIN',
-        matchValue: 'vip.example.com',
-        senderId: vip.id,
-        priority: 10,
+        provider: 'console',
+        name: 'console-from',
+        priority: 1,
+        settings: { from: 'Acme Support <support@acme.test>' },
+        fromAddresses: { billing: 'Acme Billing <billing@acme.test>', alerts: 'Acme Alerts <alerts@acme.test>' },
       });
     });
 
-    const email = (recipient: string, extra: object = {}) => ({ channel: 'CHANNEL_EMAIL', recipient, subject: 'Hi', body: 'Hello', ...extra });
-
-    it('uses the tenant default sender when no rule matches', async () => {
-      const { attempts } = await delivered(email('jane@other.example.com'));
-      expect(attempts[0].sender).toBe(support.value);
+    afterAll(async () => {
+      await providers('DeleteProvider', { id: provider.id });
     });
 
-    it('applies a matching rule', async () => {
-      const { attempts } = await delivered(email('boss@VIP.example.com'));
-      expect(attempts[0].sender).toBe(vip.value);
+    it('sends as the provider settings.from', async () => {
+      const { attempts } = await delivered(email());
+      expect(attempts[0].sender).toBe('Acme Support <support@acme.test>');
     });
 
-    it('an explicit sender_id wins over rules', async () => {
-      const { notification, attempts } = await delivered(email('boss@vip.example.com', { senderId: support.id }));
-      expect(notification.senderId).toBe(support.id);
-      expect(attempts[0].sender).toBe(support.value);
+    it('a from on the request overrides it', async () => {
+      const { notification, attempts } = await delivered(email({ from: 'Acme Billing <billing@acme.test>' }));
+      expect(notification.from).toBe('Acme Billing <billing@acme.test>');
+      expect(attempts[0].sender).toBe('Acme Billing <billing@acme.test>');
     });
 
-    it('rejects unknown senders and makes only one default per channel', async () => {
-      await hub.expectError(send(email('a@b.com', { senderId: randomUUID() })), status.NOT_FOUND, 'SENDER_NOT_FOUND');
-      await senders('UpdateSender', { id: vip.id, isDefault: true });
-      const list = await senders('ListSenders', { channel: 'CHANNEL_EMAIL' });
-      expect(list.senders.filter((s: Msg) => s.isDefault).map((s: Msg) => s.id)).toEqual([vip.id]);
-      await senders('UpdateSender', { id: support.id, isDefault: true });
+    it('a From name picks the address (and the provider that has it), recorded on the notification', async () => {
+      const { notification, attempts } = await delivered(email({ from: 'alerts' }));
+      expect(notification).toMatchObject({ from: 'alerts', sentFrom: 'Acme Alerts <alerts@acme.test>', providerName: 'console-from' });
+      expect(attempts[0]).toMatchObject({ sender: 'Acme Alerts <alerts@acme.test>', providerName: 'console-from', providerId: provider.id });
+    });
+
+    it('rejects an unknown From name when the send is made, and lists every From', async () => {
+      await hub.expectError(send(email({ from: 'marketing' })), status.NOT_FOUND, 'FROM_NOT_FOUND');
+      const { fromAddresses } = await providers('ListFromAddresses', { channel: 'CHANNEL_EMAIL' });
+      expect(fromAddresses.map((a: Msg) => [a.name ?? '(default)', a.address, a.providerName, a.isDefault])).toEqual([
+        ['(default)', 'Acme Support <support@acme.test>', 'console-from', true],
+        ['alerts', 'Acme Alerts <alerts@acme.test>', 'console-from', false],
+        ['billing', 'Acme Billing <billing@acme.test>', 'console-from', false],
+      ]);
+    });
+
+    it('validates the From format per channel', async () => {
+      await hub.expectError(send(email({ from: 'not an address' })), status.INVALID_ARGUMENT, 'VALIDATION_ERROR');
+      await hub.expectError(
+        send({ channel: 'CHANNEL_PUSH', recipient: 'tok', body: 'b', from: 'x@y.com' }),
+        status.INVALID_ARGUMENT,
+        'VALIDATION_ERROR',
+      );
+      await hub.expectError(
+        providers('UpdateProvider', { id: provider.id, settings: { from: 'nope' } }),
+        status.INVALID_ARGUMENT,
+        'PROVIDER_CONFIG_INVALID',
+      );
     });
   });
 
@@ -148,16 +165,14 @@ describe('Tenant configuration (e2e)', () => {
 
       // Primary: an SMTP server that refuses connections (transient error);
       // backup: a working provider.
-      const broken = await providers('CreateProviderConfig', {
-        tenantId: tenant.id,
+      const broken = await providers('CreateProvider', {
         channel: 'CHANNEL_EMAIL',
         provider: 'smtp',
         name: 'smtp-down',
         priority: 1,
         settings: { host: '127.0.0.1', port: '1' },
       });
-      const backup = await providers('CreateProviderConfig', {
-        tenantId: tenant.id,
+      const backup = await providers('CreateProvider', {
         channel: 'CHANNEL_EMAIL',
         provider: 'console',
         name: 'console-backup',
@@ -176,16 +191,15 @@ describe('Tenant configuration (e2e)', () => {
       ]);
 
       // Deactivating the broken one applies to the very next message.
-      await providers('UpdateProviderConfig', { tenantId: tenant.id, id: broken.id, active: false });
+      await providers('UpdateProvider', { id: broken.id, active: false });
       const after = await delivered(email);
       expect(after.attempts.map((a: Msg) => a.provider)).toEqual(['console']);
-      await providers('DeleteProviderConfig', { tenantId: tenant.id, id: backup.id });
-      await providers('DeleteProviderConfig', { tenantId: tenant.id, id: broken.id });
+      await providers('DeleteProvider', { id: backup.id });
+      await providers('DeleteProvider', { id: broken.id });
     });
 
     it('stores credentials encrypted and never returns them', async () => {
-      const created = await providers('CreateProviderConfig', {
-        tenantId: tenant.id,
+      const created = await providers('CreateProvider', {
         channel: 'CHANNEL_SMS',
         provider: 'twilio',
         name: 'twilio-main',
@@ -198,17 +212,21 @@ describe('Tenant configuration (e2e)', () => {
       const [row] = await hub.moduleRef.get(DataSource).query('SELECT credentials FROM provider_configs WHERE id = $1', [created.id]);
       expect(row.credentials).toMatch(/^enc:v1:e2e:/);
       expect(row.credentials).not.toContain('super-secret-token');
-      await providers('DeleteProviderConfig', { tenantId: tenant.id, id: created.id });
+      await providers('DeleteProvider', { id: created.id });
+    });
+
+    it('belongs to the tenant: the admin key cannot manage it', async () => {
+      await hub.expectError(hub.call('ProviderService', 'ListProviders', {}, hub.admin()), status.UNAUTHENTICATED, 'API_KEY_MISSING');
     });
 
     it('validates provider settings per kind', async () => {
       await hub.expectError(
-        providers('CreateProviderConfig', { tenantId: tenant.id, channel: 'CHANNEL_EMAIL', provider: 'sendgrid', name: 'sg', priority: 1 }),
+        providers('CreateProvider', { channel: 'CHANNEL_EMAIL', provider: 'sendgrid', name: 'sg', priority: 1 }),
         status.INVALID_ARGUMENT,
         'PROVIDER_CONFIG_INVALID',
       );
       await hub.expectError(
-        providers('CreateProviderConfig', { tenantId: tenant.id, channel: 'CHANNEL_SMS', provider: 'ses', name: 'wrong', priority: 1, settings: { region: 'x' } }),
+        providers('CreateProvider', { channel: 'CHANNEL_SMS', provider: 'ses', name: 'wrong', priority: 1, settings: { region: 'x' } }),
         status.INVALID_ARGUMENT,
         'PROVIDER_CONFIG_INVALID',
       );

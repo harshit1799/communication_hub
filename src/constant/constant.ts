@@ -128,18 +128,8 @@ export const CHANNEL_PROVIDERS: Record<ProviderChannel, ProviderKind[]> = {
   [NotificationChannel.Push]: [ProviderKind.Console, ProviderKind.Fcm],
 };
 
-/** Channels that have a sender identity (push has none). */
-export const SENDER_CHANNELS = [NotificationChannel.Email, NotificationChannel.Sms];
-
-/** How a sender rule matches a notification (see SenderResolver). */
-export enum SenderRuleMatch {
-  // Always (typically combined with a template id).
-  Any = 'any',
-  // Recipient starts with the value, e.g. "+91" (SMS).
-  RecipientPrefix = 'recipient_prefix',
-  // Recipient's email domain equals the value, e.g. "gmail.com".
-  RecipientDomain = 'recipient_domain',
-}
+/** Channels with a "From" (provider settings.from / NotificationInput.from). */
+export const FROM_CHANNELS = [NotificationChannel.Email, NotificationChannel.Sms];
 
 /** Platform default email vendor (EMAIL_PROVIDER). `console` logs instead of sending. */
 export enum EmailProviderName {
@@ -224,7 +214,6 @@ export const REDIS_KEY = {
   throttle: (key: string) => `throttle:${key}`,
   // Send-path configuration; deleted on every change (see the admin services).
   providers: (tenantId: string, channel: string) => `providers:${tenantId}:${channel}`,
-  senders: (tenantId: string, channel: string) => `senders:${tenantId}:${channel}`,
   template: (tenantId: string, channel: string, name: string) => `tpl:${tenantId}:${channel}:${name}`,
   // Versions are immutable, so this entry never needs invalidating.
   templateVersion: (templateId: string, version: number) => `tplv:${templateId}:${version}`,

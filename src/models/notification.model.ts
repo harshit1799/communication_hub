@@ -27,7 +27,6 @@ import {
 } from '../constant/index.js';
 import { ENCRYPTED, encryptedJson, encryptedString } from '../utils/crypto/encrypted.transformer.js';
 import { NotificationAttempt } from './notification-attempt.model.js';
-import { SenderIdentity } from './sender-identity.model.js';
 import { Template } from './template.model.js';
 import { Tenant } from './tenant.model.js';
 
@@ -109,17 +108,22 @@ export class Notification {
   @Column({ type: 'text', nullable: true, transformer: encryptedJson(ENCRYPTED.NOTIFICATION_DATA) })
   data: Record<string, unknown> | null;
 
-  // Sender explicitly requested by the client (null = rules / default).
-  @Column({ name: 'sender_id', type: 'uuid', nullable: true })
-  senderId: string | null;
+  // "From" requested on send: a From name ("billing") or an address
+  // (null = the provider's settings.from).
+  @Column({ name: 'from_address', type: 'varchar', length: 255, nullable: true })
+  fromAddress: string | null;
+
+  // Address it was delivered from, and the provider config (its name) that delivered it.
+  @Column({ name: 'sent_from', type: 'varchar', length: 255, nullable: true })
+  sentFrom: string | null;
+
+  @Column({ name: 'provider_name', type: 'varchar', length: 100, nullable: true })
+  providerName: string | null;
 
   // In-app only: also show a visible push (default: silent sync signal).
   @Column({ name: 'also_push', type: 'boolean', default: false })
   alsoPush: boolean;
 
-  @ManyToOne(() => SenderIdentity, { onDelete: 'SET NULL' })
-  @JoinColumn({ name: 'sender_id', foreignKeyConstraintName: 'fk_notifications_sender' })
-  sender?: Relation<SenderIdentity>;
 
   // Client references; for push also delivered as the FCM data payload.
   @Column({ type: 'jsonb', nullable: true })

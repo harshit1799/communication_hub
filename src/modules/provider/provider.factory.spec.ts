@@ -18,7 +18,8 @@ describe('validateProviderConfig', () => {
     [E, 'ses', { region: 'eu-west-1' }, {}],
     [E, 'sendgrid', {}, { api_key: 'SG.x' }],
     [S, 'twilio', { messaging_service_sid: 'MG1' }, { account_sid: 'AC1', auth_token: 't' }],
-    [S, 'sns', { region: 'us-east-1', sender_id: 'ACME' }, {}],
+    [S, 'sns', { region: 'us-east-1', from: 'ACME' }, {}],
+    [E, 'ses', { region: 'eu-west-1', from: 'Acme <no-reply@acme.com>' }, {}],
     [NotificationChannel.Push, 'fcm', {}, { service_account: '{}' }],
   ])('accepts %s/%s', (channel, provider, settings, credentials) => {
     expect(validateProviderConfig(channel, provider, settings, credentials)).toEqual([]);
@@ -30,6 +31,9 @@ describe('validateProviderConfig', () => {
     [E, 'smtp', { host: 'h', port: 'x' }, {}, 'settings.port must be a number'],
     [E, 'smtp', { host: 'h', tls: 'yes' }, {}, 'settings.tls is not supported'],
     [E, 'ses', { region: 'r' }, { access_key_id: 'only-one' }, 'must be set together'],
+    [E, 'ses', { region: 'r', from: 'not an email' }, {}, 'settings.from must be an email address'],
+    [S, 'twilio', { from: '+1 bad!' }, { account_sid: 'a', auth_token: 't' }, 'settings.from must be an E.164 number'],
+    [NotificationChannel.InApp, 'fcm', {}, {}, 'push providers'],
   ])('rejects %s/%s %#', (channel, provider, settings, credentials, message) => {
     expect(validateProviderConfig(channel, provider, settings, credentials).join(' ')).toContain(message);
   });

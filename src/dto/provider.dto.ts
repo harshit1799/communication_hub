@@ -1,5 +1,5 @@
 /**
- * Validated inputs of ProviderAdminService (proto/communication_hub/v1/provider.proto).
+ * Validated inputs of ProviderService (proto/communication_hub/v1/provider.proto).
  * Per-provider settings/credentials rules: modules/provider/provider.factory.ts.
  */
 
@@ -7,12 +7,9 @@ import { IsBoolean, IsEnum, IsInt, IsNotEmpty, IsObject, IsOptional, IsString, I
 import { NotificationChannel } from '../constant/index.js';
 
 const NAME = /^[a-z0-9][a-z0-9-]{0,98}[a-z0-9]$/;
-const NAME_MESSAGE = { message: 'name must be lowercase letters, digits or dashes' };
+const NAME_MESSAGE = { message: 'name must be 2-100 lowercase letters, digits or dashes' };
 
-export class CreateProviderConfigDto {
-  @IsUUID()
-  tenantId: string;
-
+export class CreateProviderDto {
   @IsEnum(NotificationChannel, { message: 'channel must be CHANNEL_EMAIL, CHANNEL_SMS or CHANNEL_PUSH' })
   channel: NotificationChannel;
 
@@ -33,12 +30,13 @@ export class CreateProviderConfigDto {
 
   @IsObject()
   credentials: Record<string, string>;
+
+  // Named From addresses: { billing: "Acme Billing <billing@acme.com>", ... }.
+  @IsObject()
+  fromAddresses: Record<string, string>;
 }
 
-export class UpdateProviderConfigDto {
-  @IsUUID()
-  tenantId: string;
-
+export class UpdateProviderDto {
   @IsUUID()
   id: string;
 
@@ -66,21 +64,20 @@ export class UpdateProviderConfigDto {
   @IsOptional()
   @IsObject()
   credentials?: Record<string, string>;
+
+  // Merged into the stored names ("" removes a name).
+  @IsOptional()
+  @IsObject()
+  fromAddresses?: Record<string, string>;
 }
 
-export class ListProviderConfigsDto {
-  @IsUUID()
-  tenantId: string;
-
+export class ListProvidersDto {
   @IsOptional()
   @IsEnum(NotificationChannel)
   channel?: NotificationChannel;
 }
 
-export class ProviderConfigRefDto {
-  @IsUUID()
-  tenantId: string;
-
+export class ProviderIdDto {
   @IsUUID()
   id: string;
 }

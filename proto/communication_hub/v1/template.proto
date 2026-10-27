@@ -9,24 +9,60 @@ syntax = "proto3";
 
 package communication_hub.v1;
 
+import "google/api/annotations.proto";
 import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
 import "communication_hub/v1/common.proto";
 
 service TemplateService {
   // Creates a template and its version 1 (active).
-  rpc CreateTemplate(CreateTemplateRequest) returns (Template);
-  rpc GetTemplate(TemplateRef) returns (Template);
-  rpc ListTemplates(ListTemplatesRequest) returns (ListTemplatesResponse);
+  rpc CreateTemplate(CreateTemplateRequest) returns (Template) {
+    option (google.api.http) = {
+      post: "/v1/templates"
+      body: "*"
+    };
+  }
+  rpc GetTemplate(TemplateRef) returns (Template) {
+    option (google.api.http) = {
+      get: "/v1/templates/{id}"
+    };
+  }
+  rpc ListTemplates(ListTemplatesRequest) returns (ListTemplatesResponse) {
+    option (google.api.http) = {
+      get: "/v1/templates"
+    };
+  }
   // Adds version N+1; activates it when `activate` is true.
-  rpc CreateTemplateVersion(CreateTemplateVersionRequest) returns (TemplateVersion);
-  rpc ListTemplateVersions(TemplateRef) returns (ListTemplateVersionsResponse);
+  rpc CreateTemplateVersion(CreateTemplateVersionRequest) returns (TemplateVersion) {
+    option (google.api.http) = {
+      post: "/v1/templates/{template_id}/versions"
+      body: "*"
+    };
+  }
+  rpc ListTemplateVersions(TemplateRef) returns (ListTemplateVersionsResponse) {
+    option (google.api.http) = {
+      get: "/v1/templates/{id}/versions"
+    };
+  }
   // Makes an existing version active (publish or roll back).
-  rpc ActivateTemplateVersion(ActivateTemplateVersionRequest) returns (Template);
+  rpc ActivateTemplateVersion(ActivateTemplateVersionRequest) returns (Template) {
+    option (google.api.http) = {
+      post: "/v1/templates/{template_id}/versions/{version}/activate"
+    };
+  }
   // Archived templates can no longer be used for new sends.
-  rpc ArchiveTemplate(TemplateRef) returns (Template);
+  rpc ArchiveTemplate(TemplateRef) returns (Template) {
+    option (google.api.http) = {
+      post: "/v1/templates/{id}/archive"
+    };
+  }
   // Renders a version with sample data, without sending anything.
-  rpc PreviewTemplate(PreviewTemplateRequest) returns (RenderedTemplate);
+  rpc PreviewTemplate(PreviewTemplateRequest) returns (RenderedTemplate) {
+    option (google.api.http) = {
+      post: "/v1/templates/{template_id}/preview"
+      body: "*"
+    };
+  }
 }
 
 // Handlebars content. email: subject + html and/or body (text part).

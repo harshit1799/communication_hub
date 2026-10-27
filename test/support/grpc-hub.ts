@@ -24,10 +24,9 @@ export const ADMIN_KEY = 'e2e-admin-key-0123456789abcdef0123456789';
 type Service =
   | 'NotificationService'
   | 'TemplateService'
-  | 'SenderService'
   | 'DeviceService'
   | 'InboxService'
-  | 'ProviderAdminService'
+  | 'ProviderService'
   | 'TenantAdminService';
 
 /** A loosely typed response: tests assert on shapes, not on generated types. */

@@ -3,21 +3,53 @@ syntax = "proto3";
 
 package communication_hub.v1;
 
+import "google/api/annotations.proto";
 import "google/protobuf/empty.proto";
 import "google/protobuf/timestamp.proto";
 
 service TenantAdminService {
   // Creates a tenant, its first API key and the starter templates.
-  rpc CreateTenant(CreateTenantRequest) returns (CreateTenantResponse);
-  rpc GetTenant(TenantRef) returns (Tenant);
-  rpc ListTenants(google.protobuf.Empty) returns (ListTenantsResponse);
+  rpc CreateTenant(CreateTenantRequest) returns (CreateTenantResponse) {
+    option (google.api.http) = {
+      post: "/v1/admin/tenants"
+      body: "*"
+    };
+  }
+  rpc GetTenant(TenantRef) returns (Tenant) {
+    option (google.api.http) = {
+      get: "/v1/admin/tenants/{id}"
+    };
+  }
+  rpc ListTenants(google.protobuf.Empty) returns (ListTenantsResponse) {
+    option (google.api.http) = {
+      get: "/v1/admin/tenants"
+    };
+  }
   // Takes effect immediately (cached credentials are dropped).
-  rpc UpdateTenant(UpdateTenantRequest) returns (Tenant);
+  rpc UpdateTenant(UpdateTenantRequest) returns (Tenant) {
+    option (google.api.http) = {
+      patch: "/v1/admin/tenants/{id}"
+      body: "*"
+    };
+  }
 
-  rpc CreateApiKey(CreateApiKeyRequest) returns (CreatedApiKey);
-  rpc ListApiKeys(TenantRef) returns (ListApiKeysResponse);
+  rpc CreateApiKey(CreateApiKeyRequest) returns (CreatedApiKey) {
+    option (google.api.http) = {
+      post: "/v1/admin/tenants/{tenant_id}/api-keys"
+      body: "*"
+    };
+  }
+  rpc ListApiKeys(TenantRef) returns (ListApiKeysResponse) {
+    option (google.api.http) = {
+      get: "/v1/admin/tenants/{id}/api-keys"
+    };
+  }
   // Idempotent; requests with the key fail immediately.
-  rpc RevokeApiKey(RevokeApiKeyRequest) returns (google.protobuf.Empty);
+  rpc RevokeApiKey(RevokeApiKeyRequest) returns (google.protobuf.Empty) {
+    option (google.api.http) = {
+      delete: "/v1/admin/tenants/{tenant_id}/api-keys/{key_id}"
+    };
+  }
 }
 
 message TenantSettings {

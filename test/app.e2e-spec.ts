@@ -91,6 +91,27 @@ describe('Communication Hub over gRPC (e2e)', () => {
     expect(found.notifications.map((n: { id: string }) => n.id)).toEqual([res.notification.id]);
   });
 
+  it('returns the queue state and attempts with every send', async () => {
+    const res = await send({ channel: 'CHANNEL_SMS', recipient: '+14155550123', body: 'queued', priority: 'PRIORITY_HIGH', idempotencyKey: `q-${randomUUID()}` });
+    expect(res.attempts).toEqual([]);
+    expect(res.queue).toMatchObject({ queue: 'notifications-sms', jobId: res.notification.id, priority: 1, maxAttempts: 5 });
+    expect(['waiting', 'prioritized', 'active', 'completed']).toContain(res.queue.state);
+
+    // After delivery: a replay carries the attempt history; Get shows the live job.
+    const { notification } = await hub.waitForFinal(key, res.notification.id);
+    const replay = await send({ channel: 'CHANNEL_SMS', recipient: '+14155550123', body: 'queued', idempotencyKey: notification.idempotencyKey });
+    expect(replay).toMatchObject({ replayed: true, attempts: [{ attempt: 1, success: true }] });
+    const got = await hub.call('NotificationService', 'GetNotification', { id: notification.id }, hub.tenant(key));
+    expect(got.queue).toMatchObject({ state: 'completed', attemptsMade: 1 });
+
+    // Scheduled: delayed until scheduledAt.
+    const at = new Date(Date.now() + 3_600_000);
+    const later = await send({ channel: 'CHANNEL_SMS', recipient: '+14155550123', body: 'later', scheduledAt: timestamp(at) });
+    expect(later.queue).toMatchObject({ state: 'delayed', priority: 5 });
+    expect(Math.abs(Number(later.queue.runAt.seconds) - Math.floor(at.getTime() / 1000))).toBeLessThanOrEqual(1);
+    await hub.call('NotificationService', 'CancelNotification', { id: later.notification.id }, hub.tenant(key));
+  });
+
   it('is idempotent per idempotency key', async () => {
     const notification = { channel: 'CHANNEL_SMS', recipient: '+14155550123', body: 'once', idempotencyKey: `k-${randomUUID()}` };
     const first = await send(notification);

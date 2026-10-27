@@ -23,11 +23,9 @@
   "TEMPLATE_VERSION_NOT_FOUND": "Template version {version} does not exist",
   "TEMPLATE_ARCHIVED": "Template is archived and cannot be used or changed",
   "TEMPLATE_INVALID": "Template content is invalid: {reason}",
-  "SENDER_NOT_FOUND": "Sender not found (or not active for this channel)",
-  "SENDER_VALUE_TAKEN": "This sender is already registered for the channel",
-  "SENDER_RULE_NOT_FOUND": "Sender rule not found",
   "PROVIDER_CONFIG_NOT_FOUND": "Provider config not found",
   "PROVIDER_CONFIG_INVALID": "Provider config is invalid: {reason}",
   "PROVIDER_NAME_TAKEN": "A provider config with this name already exists for this channel",
-  "INBOX_MESSAGE_NOT_FOUND": "Inbox message not found"
+  "INBOX_MESSAGE_NOT_FOUND": "Inbox message not found",
+  "FROM_NOT_FOUND": "From \"{from}\" is not a From name of your providers and not a valid address (see GET /v1/from-addresses)"
 }

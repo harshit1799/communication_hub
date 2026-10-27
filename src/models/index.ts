@@ -9,8 +9,6 @@ import { InboxMessage } from './inbox-message.model.js';
 import { NotificationAttempt } from './notification-attempt.model.js';
 import { Notification } from './notification.model.js';
 import { ProviderConfig } from './provider-config.model.js';
-import { SenderIdentity } from './sender-identity.model.js';
-import { SenderRule } from './sender-rule.model.js';
 import { TemplateVersion } from './template-version.model.js';
 import { Template } from './template.model.js';
 import { Tenant } from './tenant.model.js';
@@ -21,8 +19,6 @@ export * from './inbox-message.model.js';
 export * from './notification-attempt.model.js';
 export * from './notification.model.js';
 export * from './provider-config.model.js';
-export * from './sender-identity.model.js';
-export * from './sender-rule.model.js';
 export * from './template-version.model.js';
 export * from './template.model.js';
 export * from './tenant.model.js';
@@ -36,8 +32,6 @@ export const ENTITIES = [
   DeviceToken,
   Template,
   TemplateVersion,
-  SenderIdentity,
-  SenderRule,
   ProviderConfig,
   InboxMessage,
 ];

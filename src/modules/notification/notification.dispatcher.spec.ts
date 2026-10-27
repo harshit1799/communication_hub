@@ -1,6 +1,6 @@
 /**
  * Unit tests for the worker-side delivery logic: status transitions,
- * permanent vs. transient errors, provider failover, sender use, pinned
+ * permanent vs. transient errors, provider failover, "From" selection, pinned
  * template versions and push fan-out. Storage and vendors are fakes; the
  * real TemplateService/TemplateRenderer render the content.
  */
@@ -18,7 +18,6 @@ import { DeviceRepository } from '../device/device.repository.js';
 import { InboxService } from '../inbox/inbox.service.js';
 import { ProviderResolver } from '../provider/provider.resolver.js';
 import type { ProviderHandle } from '../provider/provider.types.js';
-import { SenderResolver } from '../sender/sender.resolver.js';
 import { TemplateRepository } from '../template/template.repository.js';
 import { TemplateService } from '../template/template.service.js';
 import { NotificationAttemptRepository } from './notification-attempt.repository.js';
@@ -34,8 +33,8 @@ const client = (name: string) => ({
 type FakeClient = ReturnType<typeof client>;
 
 /** A provider handle around a fake client (provider kind = client name). */
-const handle = (c: FakeClient, id = `cfg-${c.name}`): ProviderHandle =>
-  ({ spec: { id, provider: c.name as ProviderKind }, client: () => Promise.resolve(c) }) as unknown as ProviderHandle;
+const handle = (c: FakeClient, settings: Record<string, string> = {}, id = `cfg-${c.name}`): ProviderHandle =>
+  ({ spec: { id, provider: c.name as ProviderKind, settings }, client: () => Promise.resolve(c) }) as unknown as ProviderHandle;
 
 /** Builds a dispatcher around fakes and the given notification row. */
 function setup(notification: Partial<Notification>, options: { providers?: FakeClient[]; version?: object } = {}) {
@@ -52,7 +51,7 @@ function setup(notification: Partial<Notification>, options: { providers?: FakeC
     templateVersion: null,
     data: null,
     metadata: null,
-    senderId: null,
+    fromAddress: null,
     ...notification,
   } as Notification;
   const notifications = {
@@ -68,7 +67,6 @@ function setup(notification: Partial<Notification>, options: { providers?: FakeC
     resolve: vi.fn().mockResolvedValue(clients.map((c) => handle(c))),
     platformName: () => 'console',
   };
-  const senders = { resolve: vi.fn().mockResolvedValue(null) };
   const config = {
     getOrThrow: () => ({ name: 'Hub', mail: { from: 'Hub <no-reply@hub.io>' }, cache: { templateTtlSeconds: 60 } }),
   } as unknown as ConfigService;
@@ -93,13 +91,12 @@ function setup(notification: Partial<Notification>, options: { providers?: FakeC
     attempts as unknown as NotificationAttemptRepository,
     devices as unknown as DeviceRepository,
     templates,
-    senders as unknown as SenderResolver,
     providers as unknown as ProviderResolver,
     metrics,
     inbox as unknown as InboxService,
     config,
   );
-  return { dispatcher, notifications, attempts, devices, providers, senders, templateRepo, clients, metrics, inbox };
+  return { dispatcher, notifications, attempts, devices, providers, templateRepo, clients, metrics, inbox };
 }
 
 /** A minimal BullMQ job: attempts made so far and the attempt limit. */
@@ -109,7 +106,7 @@ const job = (attemptsMade = 0, attempts = 3) =>
 const sms = { channel: NotificationChannel.Sms, recipient: '+14155550123', body: 'hi' };
 
 describe('NotificationDispatcher', () => {
-  it('renders the pinned email version with tenant branding, uses the resolved sender, and marks it sent', async () => {
+  it('renders the pinned email version with tenant branding, sends from the provider settings.from, and marks it sent', async () => {
     const t = setup(
       {
         channel: NotificationChannel.Email,
@@ -121,20 +118,20 @@ describe('NotificationDispatcher', () => {
       },
       { version: { subject: 'Code {{code}}', html: '<p>{{appName}}: hi {{name}}</p>', body: null } },
     );
-    t.senders.resolve.mockResolvedValue({ senderId: 's-1', value: 'Acme <hi@acme.io>', providerConfigId: 'cfg-ses', source: 'rule' });
+    t.providers.resolve.mockResolvedValue([handle(t.clients[0], { from: 'Acme <hi@acme.io>' })]);
     await t.dispatcher.dispatch(job());
 
     expect(t.templateRepo.findVersion).toHaveBeenCalledWith('tpl-1', 3);
-    expect(t.providers.resolve).toHaveBeenCalledWith('t-1', NotificationChannel.Email, 'cfg-ses');
+    expect(t.providers.resolve).toHaveBeenCalledWith('t-1', NotificationChannel.Email);
     const message = t.clients[0].send.mock.calls[0][0];
     expect(message).toMatchObject({ to: 'jane@example.com', from: 'Acme <hi@acme.io>', subject: 'Code 123456' });
     // {{values}} are HTML-escaped in the HTML part.
     expect(message.html).toBe('<p>Acme: hi &lt;Jane&gt;</p>');
-    expect(t.notifications.markSent).toHaveBeenCalledWith('n-1', 'ses', 'ses-1');
+    expect(t.notifications.markSent).toHaveBeenCalledWith('n-1', 'ses', 'ses-1', expect.any(Object));
     expect(t.attempts.record).toHaveBeenCalledWith(expect.objectContaining({ success: true, attempt: 1, sender: 'Acme <hi@acme.io>' }));
   });
 
-  it('an inline subject overrides the template subject; no sender falls back to MAIL_FROM', async () => {
+  it('an inline subject overrides the template subject; no from falls back to MAIL_FROM', async () => {
     const t = setup(
       { channel: NotificationChannel.Email, recipient: 'a@b.com', subject: 'Custom {{x}}', templateId: 'tpl-1', templateVersion: 1, template: 'w', data: { x: '!' } },
       { version: { subject: 'Template subject', html: '<title>{{subject}}</title>' } },
@@ -154,14 +151,14 @@ describe('NotificationDispatcher', () => {
     const t = setup(sms, { providers: [client('twilio')] });
     t.clients[0].send.mockRejectedValue(new Error('ECONNRESET'));
     await expect(t.dispatcher.dispatch(job(0, 3))).rejects.toThrow('ECONNRESET');
-    expect(t.notifications.markFailure).toHaveBeenCalledWith('n-1', NotificationStatus.Retrying, 'twilio', 'ECONNRESET');
+    expect(t.notifications.markFailure).toHaveBeenCalledWith('n-1', NotificationStatus.Retrying, 'twilio', 'ECONNRESET', null);
   });
 
   it('marks the last transient failure as failed', async () => {
     const t = setup(sms, { providers: [client('twilio')] });
     t.clients[0].send.mockRejectedValue(new Error('timeout'));
     await expect(t.dispatcher.dispatch(job(2, 3))).rejects.toThrow('timeout');
-    expect(t.notifications.markFailure).toHaveBeenCalledWith('n-1', NotificationStatus.Failed, 'twilio', 'timeout');
+    expect(t.notifications.markFailure).toHaveBeenCalledWith('n-1', NotificationStatus.Failed, 'twilio', 'timeout', null);
   });
 
   it('fails permanent errors immediately with UnrecoverableError, without failing over', async () => {
@@ -169,7 +166,7 @@ describe('NotificationDispatcher', () => {
     t.clients[0].send.mockRejectedValue(new PermanentDeliveryError('unsubscribed', 'twilio'));
     await expect(t.dispatcher.dispatch(job(0, 3))).rejects.toBeInstanceOf(UnrecoverableError);
     expect(t.clients[1].send).not.toHaveBeenCalled();
-    expect(t.notifications.markFailure).toHaveBeenCalledWith('n-1', NotificationStatus.Failed, 'twilio', 'unsubscribed');
+    expect(t.notifications.markFailure).toHaveBeenCalledWith('n-1', NotificationStatus.Failed, 'twilio', 'unsubscribed', null);
     expect(t.attempts.record).toHaveBeenCalledWith(expect.objectContaining({ success: false, permanent: true }));
   });
 
@@ -179,7 +176,7 @@ describe('NotificationDispatcher', () => {
     await t.dispatcher.dispatch(job());
 
     expect(t.clients[1].send).toHaveBeenCalledTimes(1);
-    expect(t.notifications.markSent).toHaveBeenCalledWith('n-1', 'sns', 'sns-1');
+    expect(t.notifications.markSent).toHaveBeenCalledWith('n-1', 'sns', 'sns-1', expect.any(Object));
     expect(t.notifications.markFailure).not.toHaveBeenCalled();
     expect(t.attempts.record.mock.calls.map(([a]) => [a.attempt, a.provider, a.success])).toEqual([
       [1, 'twilio', false],
@@ -194,32 +191,43 @@ describe('NotificationDispatcher', () => {
     t.clients[0].send.mockRejectedValue(new Error('a down'));
     t.clients[1].send.mockRejectedValue(new Error('b down'));
     await expect(t.dispatcher.dispatch(job(0, 3))).rejects.toThrow('b down');
-    expect(t.notifications.markFailure).toHaveBeenCalledWith('n-1', NotificationStatus.Retrying, 'sns', 'b down');
+    expect(t.notifications.markFailure).toHaveBeenCalledWith('n-1', NotificationStatus.Retrying, 'sns', 'b down', null);
     expect(t.attempts.record).toHaveBeenCalledTimes(2);
   });
 
   it('a provider whose client cannot be created fails over like a transient error', async () => {
     const t = setup(sms, { providers: [client('twilio'), client('sns')] });
     t.providers.resolve.mockResolvedValue([
-      { spec: { id: 'bad', provider: 'twilio' }, client: () => Promise.reject(new Error('invalid service account')) },
+      { spec: { id: 'bad', provider: 'twilio', settings: {} }, client: () => Promise.reject(new Error('invalid service account')) },
       handle(t.clients[1]),
     ]);
     await t.dispatcher.dispatch(job());
-    expect(t.notifications.markSent).toHaveBeenCalledWith('n-1', 'sns', 'sns-1');
+    expect(t.notifications.markSent).toHaveBeenCalledWith('n-1', 'sns', 'sns-1', expect.any(Object));
   });
 
-  it('fails permanently when the requested sender is no longer active', async () => {
-    const t = setup({ ...sms, senderId: 's-gone' });
-    t.senders.resolve.mockRejectedValue(new PermanentDeliveryError('Sender s-gone is no longer active', 'sender'));
-    await expect(t.dispatcher.dispatch(job())).rejects.toBeInstanceOf(UnrecoverableError);
-    expect(t.notifications.markFailure).toHaveBeenCalledWith('n-1', NotificationStatus.Failed, 'sender', 'Sender s-gone is no longer active');
-    expect(t.clients[0].send).not.toHaveBeenCalled();
+  it('the request from overrides settings.from on every provider of a failover chain', async () => {
+    const t = setup({ ...sms, fromAddress: 'ACMEIN' }, { providers: [client('twilio'), client('sns')] });
+    t.providers.resolve.mockResolvedValue([handle(t.clients[0], { from: '+14155550100' }), handle(t.clients[1], { from: 'ACMEUS' })]);
+    t.clients[0].send.mockRejectedValue(new Error('503'));
+    await t.dispatcher.dispatch(job());
+    expect(t.clients[0].send.mock.calls[0][0].from).toBe('ACMEIN');
+    expect(t.clients[1].send.mock.calls[0][0].from).toBe('ACMEIN');
+    expect(t.attempts.record.mock.calls.map(([a]) => a.sender)).toEqual(['ACMEIN', 'ACMEIN']);
+  });
+
+  it('each provider sends as its own settings.from; SMS without one leaves it to the vendor default', async () => {
+    const t = setup(sms, { providers: [client('twilio'), client('sns')] });
+    t.providers.resolve.mockResolvedValue([handle(t.clients[0], { from: '+14155550100' }), handle(t.clients[1])]);
+    t.clients[0].send.mockRejectedValue(new Error('503'));
+    await t.dispatcher.dispatch(job());
+    expect(t.clients[0].send.mock.calls[0][0].from).toBe('+14155550100');
+    expect(t.clients[1].send.mock.calls[0][0].from).toBeUndefined();
   });
 
   it('fails permanently when the pinned template version is gone', async () => {
     const t = setup({ ...sms, body: null, template: 'otp', templateId: 'tpl-1', templateVersion: 9 });
     await expect(t.dispatcher.dispatch(job())).rejects.toBeInstanceOf(UnrecoverableError);
-    expect(t.notifications.markFailure).toHaveBeenCalledWith('n-1', NotificationStatus.Failed, 'template', 'Template version 9 no longer exists');
+    expect(t.notifications.markFailure).toHaveBeenCalledWith('n-1', NotificationStatus.Failed, 'template', 'Template version 9 no longer exists', null);
   });
 
   it('fans push out to the user devices and deactivates dead tokens', async () => {
@@ -257,7 +265,7 @@ describe('NotificationDispatcher', () => {
       await t.dispatcher.dispatch(job());
 
       expect(t.inbox.deliver).toHaveBeenCalledWith(expect.objectContaining({ id: 'n-1' }), { title: 'Hi Jo', body: 'Order 42 shipped' });
-      expect(t.notifications.markSent).toHaveBeenCalledWith('n-1', 'inbox', 'inbox-1');
+      expect(t.notifications.markSent).toHaveBeenCalledWith('n-1', 'inbox', 'inbox-1', expect.any(Object));
       expect(t.clients[0].send.mock.calls[0][0]).toMatchObject({
         tokens: ['tok-1'],
         silent: true,
@@ -296,7 +304,7 @@ describe('NotificationDispatcher', () => {
       const broken = setup(inApp, { providers: [client('fcm')] });
       broken.inbox.deliver.mockRejectedValue(new Error('db timeout'));
       await expect(broken.dispatcher.dispatch(job(0, 3))).rejects.toThrow('db timeout');
-      expect(broken.notifications.markFailure).toHaveBeenCalledWith('n-1', NotificationStatus.Retrying, 'inbox', 'db timeout');
+      expect(broken.notifications.markFailure).toHaveBeenCalledWith('n-1', NotificationStatus.Retrying, 'inbox', 'db timeout', null);
     });
   });
 });

@@ -20,7 +20,6 @@ export type NewNotification = Omit<
   Notification,
   | 'tenant'
   | 'templateRef'
-  | 'sender'
   | 'attemptLog'
   | 'createdAt'
   | 'updatedAt'
@@ -29,6 +28,8 @@ export type NewNotification = Omit<
   | 'providerMessageId'
   | 'error'
   | 'sentAt'
+  | 'sentFrom'
+  | 'providerName'
 >;
 
 /** Filters of ListNotifications; the recipient arrives as its blind index. */
@@ -120,11 +121,16 @@ export class NotificationRepository extends BaseRepository<Notification> {
     return row?.attempts ?? null;
   }
 
-  /** processing -> sent, with the vendor's message id. */
-  async markSent(id: string, provider: string, providerMessageId: string): Promise<void> {
+  /** processing -> sent, with the vendor's message id, the From used and the provider config name. */
+  async markSent(
+    id: string,
+    provider: string,
+    providerMessageId: string,
+    via: { sentFrom: string | null; providerName: string | null },
+  ): Promise<void> {
     await this.updateWhere(
       { id, status: NotificationStatus.Processing },
-      { status: NotificationStatus.Sent, provider, providerMessageId, error: null, sentAt: new Date() },
+      { status: NotificationStatus.Sent, provider, providerMessageId, error: null, sentAt: new Date(), sentFrom: via.sentFrom, providerName: via.providerName },
     );
   }
 
@@ -134,8 +140,9 @@ export class NotificationRepository extends BaseRepository<Notification> {
     status: NotificationStatus.Retrying | NotificationStatus.Failed,
     provider: string,
     error: string,
+    providerName: string | null = null,
   ): Promise<void> {
-    await this.updateWhere({ id, status: NotificationStatus.Processing }, { status, provider, error });
+    await this.updateWhere({ id, status: NotificationStatus.Processing }, { status, provider, error, providerName });
   }
 
   /** failed -> queued (manual retry). Returns false if it wasn't failed. */

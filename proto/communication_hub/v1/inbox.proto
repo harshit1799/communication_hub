@@ -10,18 +10,40 @@ syntax = "proto3";
 
 package communication_hub.v1;
 
+import "google/api/annotations.proto";
 import "google/protobuf/timestamp.proto";
 import "communication_hub/v1/common.proto";
 
 service InboxService {
   // The user's messages, newest first (expired ones excluded).
-  rpc ListInboxMessages(ListInboxMessagesRequest) returns (ListInboxMessagesResponse);
-  rpc GetUnreadCount(InboxUserRef) returns (UnreadCount);
+  rpc ListInboxMessages(ListInboxMessagesRequest) returns (ListInboxMessagesResponse) {
+    option (google.api.http) = {
+      get: "/v1/users/{user_id}/inbox"
+    };
+  }
+  rpc GetUnreadCount(InboxUserRef) returns (UnreadCount) {
+    option (google.api.http) = {
+      get: "/v1/users/{user_id}/inbox/unread-count"
+    };
+  }
   // Marks the given messages read; returns the new unread count.
-  rpc MarkInboxMessagesRead(MarkInboxMessagesReadRequest) returns (UnreadCount);
-  rpc MarkAllInboxMessagesRead(InboxUserRef) returns (UnreadCount);
+  rpc MarkInboxMessagesRead(MarkInboxMessagesReadRequest) returns (UnreadCount) {
+    option (google.api.http) = {
+      post: "/v1/users/{user_id}/inbox/read"
+      body: "*"
+    };
+  }
+  rpc MarkAllInboxMessagesRead(InboxUserRef) returns (UnreadCount) {
+    option (google.api.http) = {
+      post: "/v1/users/{user_id}/inbox/read-all"
+    };
+  }
   // Deletes one message of the user; returns the new unread count.
-  rpc DeleteInboxMessage(InboxMessageRef) returns (UnreadCount);
+  rpc DeleteInboxMessage(InboxMessageRef) returns (UnreadCount) {
+    option (google.api.http) = {
+      delete: "/v1/users/{user_id}/inbox/{id}"
+    };
+  }
 }
 
 message InboxMessage {

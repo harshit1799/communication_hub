@@ -3,8 +3,8 @@
  * happens asynchronously in the workers (notification.dispatcher.ts), so the
  * API stays fast and vendor outages never block clients.
  *
- * At accept time the template is resolved and its version pinned, and an
- * explicit sender is checked; recipient and data are encrypted on insert
+ * At accept time the template is resolved and its version pinned;
+ * recipient and data are encrypted on insert
  * (column transformers) with a blind index for lookups.
  *
  * Reliability: the row is committed before the job is enqueued. If
@@ -13,20 +13,23 @@
  */
 
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { AppConfig } from '../../config/configuration.js';
 import { randomUUID } from 'node:crypto';
 import { Cursor } from '../../common/dtos/common.dtos.js';
 import { LIMITS, NotificationChannel, NotificationPriority, NotificationStatus } from '../../constant/index.js';
 import { ListNotificationsDto, SendNotificationDto } from '../../dto/index.js';
 import { AppException } from '../../exceptions/index.js';
-import { Notification } from '../../models/index.js';
+import { Notification, NotificationAttempt } from '../../models/index.js';
 import { ERROR } from '../../response/response.js';
 import { errorMessage } from '../../utils/appUtils.js';
 import { FieldCipher } from '../../utils/crypto/field-cipher.js';
 import { normaliseRecipient } from '../../utils/crypto/recipient.js';
 import { MetricsService } from '../../utils/metrics/metrics.service.js';
-import { SenderResolver } from '../sender/sender.resolver.js';
+import { selectFrom } from '../provider/from-addresses.js';
+import { ProviderResolver } from '../provider/provider.resolver.js';
 import { TemplateService } from '../template/template.service.js';
-import { NotificationQueue } from './notification.queue.js';
+import { NotificationQueue, QueueSnapshot } from './notification.queue.js';
 import { NewNotification, NotificationRepository } from './notification.repository.js';
 
 /** One day in milliseconds (scheduling limit). */
@@ -37,6 +40,10 @@ export interface SendResult {
   notification: Notification;
   // True when an earlier notification was returned for a repeated idempotency key.
   replayed: boolean;
+  // Attempts so far: [] for a new notification, the history for a replay.
+  attempts: NotificationAttempt[];
+  // Live queue state; null when Redis can't be read right now.
+  queue: QueueSnapshot | null;
 }
 
 /** Used by NotificationController; never talks to vendors directly. */
@@ -48,10 +55,15 @@ export class NotificationService {
     private readonly notifications: NotificationRepository,
     private readonly queue: NotificationQueue,
     private readonly templates: TemplateService,
-    private readonly senders: SenderResolver,
+    private readonly providers: ProviderResolver,
     private readonly cipher: FieldCipher,
     private readonly metrics: MetricsService,
-  ) {}
+    config: ConfigService,
+  ) {
+    this.maxAttempts = config.getOrThrow<AppConfig>('app').queue.attempts;
+  }
+
+  private readonly maxAttempts: number;
 
   /** Accepts one notification (normal priority unless set). */
   async send(tenantId: string, dto: SendNotificationDto, requestId?: string): Promise<SendResult> {
@@ -87,10 +99,11 @@ export class NotificationService {
   }
 
   /** A notification with its attempt log. Throws NOTIFICATION_NOT_FOUND. */
-  async findOne(tenantId: string, id: string): Promise<Notification> {
+  /** A notification with its attempt log and live queue state. Throws NOTIFICATION_NOT_FOUND. */
+  async findOne(tenantId: string, id: string): Promise<{ notification: Notification; queue: QueueSnapshot | null }> {
     const n = await this.notifications.findWithAttempts(tenantId, id);
     if (!n) throw new AppException(ERROR.NOTIFICATION_NOT_FOUND);
-    return n;
+    return { notification: n, queue: await this.queueState(n) };
   }
 
   /** Sends a failed notification again (e.g. after fixing a provider). */
@@ -147,7 +160,7 @@ export class NotificationService {
       templateVersion: resolved[i]?.version ?? null,
       data: dto.data ?? null,
       metadata: dto.metadata ?? null,
-      senderId: dto.senderId ?? null,
+      fromAddress: dto.from?.trim() ?? null,
       alsoPush: dto.alsoPush ?? false,
       status: NotificationStatus.Queued,
       priority: dto.priority ?? defaultPriority,
@@ -170,23 +183,44 @@ export class NotificationService {
     // Respond in request order; duplicates resolve to the original rows.
     const byId = new Map(inserted.map((n) => [n.id, n]));
     const byKey = new Map(duplicates.map((n) => [n.idempotencyKey, n]));
-    return rows.map((r) => {
+    const results = rows.map((r) => {
       const created = byId.get(r.id);
       if (created) this.metrics.accepted.inc({ channel: r.channel, priority: r.priority });
       else this.metrics.replayed.inc({ channel: r.channel });
       return { notification: created ?? byKey.get(r.idempotencyKey)!, replayed: !created };
     });
+
+    // Queue state for each, and the attempt history for replays (a retrying
+    // client sees what already happened). Read after enqueueing, so a fast
+    // worker may already show the job as active or completed.
+    return Promise.all(
+      results.map(async (r) => ({
+        ...r,
+        queue: await this.queueState(r.notification),
+        attempts: r.replayed ? ((await this.notifications.findWithAttempts(tenantId, r.notification.id))?.attemptLog ?? []) : [],
+      })),
+    );
+  }
+
+  /** Live queue state, or null when Redis can't be read (never fails the request). */
+  private async queueState(n: Notification): Promise<QueueSnapshot | null> {
+    try {
+      return await this.queue.inspect(n, this.maxAttempts);
+    } catch (err) {
+      this.logger.warn(`Queue state unavailable for ${n.id}: ${errorMessage(err)}`);
+      return null;
+    }
   }
 
   /**
    * Checks DTO decorators can't express: the template exists (and pins its
-   * version), the sender is the tenant's and active, inline placeholders
+   * version), the From name exists on a provider, inline placeholders
    * compile, scheduledAt is within the limit. Template lookups are shared
    * across a bulk request.
    */
   private async validate(tenantId: string, dtos: SendNotificationDto[]): Promise<({ templateId: string; version: number } | null)[]> {
     const templateLookups = new Map<string, Promise<{ templateId: string; version: number }>>();
-    const senderLookups = new Map<string, Promise<boolean>>();
+    const fromLookups = new Map<string, Promise<string | null>>();
     const resolved: ({ templateId: string; version: number } | null)[] = [];
 
     for (const dto of dtos) {
@@ -198,6 +232,21 @@ export class NotificationService {
           throw new AppException(ERROR.TEMPLATE_RENDER_FAILED, undefined, { reason: errorMessage(err) });
         }
       }
+      if (dto.from) {
+        // Same selection as the worker: an unknown From name fails now, not at delivery.
+        const key = `${dto.channel}:${dto.from}`;
+        if (!fromLookups.has(key)) {
+          fromLookups.set(
+            key,
+            this.providers.resolve(tenantId, dto.channel).then((handles) => {
+              const selection = selectFrom(dto.channel, handles, dto.from, '');
+              return selection.ok ? null : selection.error;
+            }),
+          );
+        }
+        const error = await fromLookups.get(key);
+        if (error) throw new AppException(ERROR.FROM_NOT_FOUND, { errors: [error] }, { from: dto.from });
+      }
       if (dto.alsoPush && dto.channel !== NotificationChannel.InApp) {
         const message = 'alsoPush is only supported for CHANNEL_IN_APP';
         throw new AppException(ERROR.VALIDATION_ERROR, { errors: [message] }, { detail: message });
@@ -205,11 +254,6 @@ export class NotificationService {
       if (dto.scheduledAt && dto.scheduledAt.getTime() > Date.now() + LIMITS.SCHEDULE_MAX_DAYS * DAY_MS) {
         const message = `scheduledAt must be within ${LIMITS.SCHEDULE_MAX_DAYS} days`;
         throw new AppException(ERROR.VALIDATION_ERROR, { errors: [message] }, { detail: message });
-      }
-      if (dto.senderId) {
-        const key = `${dto.channel}:${dto.senderId}`;
-        if (!senderLookups.has(key)) senderLookups.set(key, this.senders.isUsable(tenantId, dto.channel, dto.senderId));
-        if (!(await senderLookups.get(key))) throw new AppException(ERROR.SENDER_NOT_FOUND);
       }
       if (dto.template) {
         const key = `${dto.channel}:${dto.template}:${dto.templateVersion ?? ''}`;

@@ -85,8 +85,6 @@ export interface CryptoConfig {
 export interface CacheConfig {
   // Provider configs per tenant + channel.
   providerTtlSeconds: number;
-  // Sender identities and rules per tenant + channel.
-  senderTtlSeconds: number;
   // Active template version per tenant + channel + name.
   templateTtlSeconds: number;
 }
@@ -272,7 +270,6 @@ export default (): { app: AppConfig } => {
       },
       cache: {
         providerTtlSeconds: int(env.PROVIDER_CACHE_TTL_SECONDS, 300),
-        senderTtlSeconds: int(env.SENDER_CACHE_TTL_SECONDS, 300),
         templateTtlSeconds: int(env.TEMPLATE_CACHE_TTL_SECONDS, 300),
       },
       auth: {

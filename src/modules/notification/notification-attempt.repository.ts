@@ -20,6 +20,8 @@ export class NotificationAttemptRepository extends BaseRepository<NotificationAt
     notificationId: string;
     attempt: number;
     provider: string;
+    providerName?: string | null;
+    providerConfigId?: string | null;
     sender?: string | null;
     success: boolean;
     providerMessageId?: string | null;
@@ -30,6 +32,8 @@ export class NotificationAttemptRepository extends BaseRepository<NotificationAt
     await this.insert({
       ...input,
       sender: input.sender ?? null,
+      providerName: input.providerName ?? null,
+      providerConfigId: input.providerConfigId ?? null,
       providerMessageId: input.providerMessageId ?? null,
       error: input.error ?? null,
       permanent: input.permanent ?? false,
