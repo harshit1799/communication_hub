@@ -13,6 +13,7 @@ import { ERROR } from '../../response/response.js';
 import { NotificationChannel } from '../../constant/index.js';
 import { ProviderConfigRepository } from './provider-config.repository.js';
 import { addressesOf, validateFromAddresses } from './from-addresses.js';
+import { mergeLimits, validateLimits } from './provider-limits.js';
 import { validateProviderConfig } from './provider.factory.js';
 import { ProviderResolver } from './provider.resolver.js';
 
@@ -29,6 +30,7 @@ export class ProviderConfigService {
     this.assertValid([
       ...validateProviderConfig(dto.channel, dto.provider, dto.settings, dto.credentials),
       ...validateFromAddresses(dto.channel, dto.fromAddresses),
+      ...validateLimits(dto.limits),
     ]);
     try {
       const saved = await this.configs.create({
@@ -40,6 +42,7 @@ export class ProviderConfigService {
         isActive: true,
         settings: dto.settings,
         fromAddresses: dto.fromAddresses,
+        limits: dto.limits,
         credentials: dto.credentials,
       });
       await this.resolver.invalidate(tenantId, saved.channel);
@@ -68,9 +71,11 @@ export class ProviderConfigService {
     const credentials = dto.credentials ?? config.credentials;
     const fromAddresses = { ...config.fromAddresses, ...dto.fromAddresses };
     for (const [name, address] of Object.entries(fromAddresses)) if (address === '') delete fromAddresses[name];
+    const limits = mergeLimits(config.limits ?? {}, dto.limits);
     this.assertValid([
       ...validateProviderConfig(config.channel, config.provider, settings, credentials),
       ...validateFromAddresses(config.channel, fromAddresses),
+      ...validateLimits(limits),
     ]);
 
     if (dto.name !== undefined) config.name = dto.name;
@@ -78,6 +83,7 @@ export class ProviderConfigService {
     if (dto.active !== undefined) config.isActive = dto.active;
     config.settings = settings;
     config.fromAddresses = fromAddresses;
+    config.limits = limits;
     config.credentials = credentials;
     try {
       const saved = await this.configs.save(config);

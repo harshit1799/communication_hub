@@ -113,6 +113,16 @@ export function nonEmptyMap(map: Record<string, string> | null | undefined): Rec
   return map && Object.keys(map).length > 0 ? map : undefined;
 }
 
+/**
+ * A decoded message as plain fields: drops proto-loader's synthetic oneof
+ * markers for proto3 `optional` fields ("_maxAttempts": "maxAttempts") and
+ * unset values. For sub-messages passed on without a DTO (e.g. limits).
+ */
+export function fieldsOf<T extends object>(message: T | null | undefined): Partial<T> {
+  if (!message) return {};
+  return Object.fromEntries(Object.entries(message).filter(([k, v]) => !k.startsWith('_') && v !== undefined && v !== null)) as Partial<T>;
+}
+
 /** Omits undefined/null fields, so optional proto fields stay unset on the wire. */
 export function compact<T extends Record<string, unknown>>(obj: T): T {
   return Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined && v !== null)) as T;

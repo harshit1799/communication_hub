@@ -389,6 +389,19 @@ another vendor would reject it too. When all fail, the job is retried with backo
 Clients (SMTP pools, Firebase apps, SDK clients) are created once per config version and
 reused; a changed config gets a new client and the old one is closed.
 
+**Limits per provider** (`limits`, stored with the provider, read through the same cache):
+
+| Limit | Effect | Replaces |
+| --- | --- | --- |
+| `maxAttempts`, `backoffMs` | retry policy of messages this provider delivers (set on the job when it's queued, from the first provider after From selection) | `QUEUE_ATTEMPTS`, `QUEUE_BACKOFF_MS` (now the defaults) |
+| `rateMax` + `rateDurationMs` | at most N sends per window through this provider, across all workers (Redis) | the per-channel `*_RATE_MAX` for vendor limits |
+| `maxConcurrency` | at most N sends in flight to this provider at once, across all workers (Redis leases) | per-vendor use of `*_WORKER_CONCURRENCY` |
+
+A provider at its limit is **skipped for the next one**; if every provider is at its limit the
+message is **re-delayed until a slot frees, without using an attempt**. `*_WORKER_CONCURRENCY`
+(jobs per worker process) and `*_RATE_MAX` (platform-wide ceiling per channel) stay in env:
+they describe the deployment, not a vendor.
+
 ---
 
 ## 8. Encryption of recipient data
@@ -496,6 +509,7 @@ filtered with `| json`.
 | `chub_delivery_retries_total`, `chub_provider_failovers_total` | channel, (from_provider) |
 | `chub_queue_jobs` (gauge, read from BullMQ at scrape) | queue, state (waiting / active / delayed / failed) |
 | `chub_sweeper_requeued_total` | |
+| `chub_provider_throttled_total` | channel, provider, reason (rate / concurrency) |
 | `chub_inbox_signals_total`, `chub_inbox_purged_total` | outcome (silent / visible / no_devices / failed) |
 | `chub_grpc_requests_total`, `chub_grpc_request_duration_seconds` | method, code |
 | `chub_process_*`, `chub_nodejs_*` | Node.js runtime defaults |
@@ -526,7 +540,7 @@ All variables are listed in `.env.example` and validated at startup
 | Bootstrap tenant | `BOOTSTRAP_TENANT_NAME`, `BOOTSTRAP_TENANT_SLUG`, `BOOTSTRAP_TENANT_API_KEY` |
 | PostgreSQL | `DB_HOST`, `DB_PORT`, `DB_USERNAME`, `DB_PASSWORD` (required), `DB_NAME`, `DB_SSL`, `DB_LOGGING`, `DB_POOL_SIZE` |
 | Redis | `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `REDIS_DB`, `REDIS_TLS`, `REDIS_CLUSTER`, `REDIS_KEY_PREFIX` |
-| Queue | `QUEUE_ATTEMPTS` (5), `QUEUE_BACKOFF_MS` (5000), `QUEUE_STUCK_AFTER_MINUTES` (2), `EMAIL_/SMS_/PUSH_/IN_APP_` + `WORKER_CONCURRENCY`, `RATE_MAX`, `RATE_DURATION_MS` |
+| Queue | `QUEUE_ATTEMPTS` (5), `QUEUE_BACKOFF_MS` (5000) (defaults; providers can override), `QUEUE_STUCK_AFTER_MINUTES` (2), `EMAIL_/SMS_/PUSH_/IN_APP_` + `WORKER_CONCURRENCY`, `RATE_MAX`, `RATE_DURATION_MS` |
 | In-app | `INBOX_RETENTION_DAYS` (90) |
 | Platform default providers | `EMAIL_PROVIDER`, `MAIL_FROM`, `SMTP_*`, `SENDGRID_API_KEY`, `SMS_PROVIDER`, `TWILIO_*`, `SNS_SENDER_ID`, `PUSH_PROVIDER`, `FIREBASE_SERVICE_ACCOUNT` |
 | AWS | `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (leave empty to use the IAM role) |

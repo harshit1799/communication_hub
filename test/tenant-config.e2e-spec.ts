@@ -233,6 +233,54 @@ describe('Tenant configuration (e2e)', () => {
     });
   });
 
+  describe('3b. Provider limits from the DB (retries, rate, concurrency)', () => {
+    const sms = (body: string) => ({ channel: 'CHANNEL_SMS', recipient: '+14155550177', body });
+    const created: string[] = [];
+    const provider = async (body: object) => {
+      const p = await providers('CreateProvider', { channel: 'CHANNEL_SMS', provider: 'console', ...body });
+      created.push(p.id);
+      return p;
+    };
+
+    afterEach(async () => {
+      for (const id of created.splice(0)) await providers('DeleteProvider', { id });
+    });
+
+    it("the job gets the provider's retry policy", async () => {
+      const p = await provider({ name: 'sms-retry', priority: 1, limits: { maxAttempts: 2, backoffMs: 250 } });
+      expect(p.limits).toMatchObject({ maxAttempts: 2, backoffMs: 250 });
+      const res = await send(sms('policy'));
+      expect(res.queue.maxAttempts).toBe(2);
+    });
+
+    it('a rate limit spaces sends out across workers, without using attempts', async () => {
+      await provider({ name: 'sms-slow', priority: 1, limits: { rateMax: 1, rateDurationMs: 700 } });
+      const sent = await Promise.all([1, 2, 3].map((i) => send(sms(`rate ${i}`))));
+      const done = await Promise.all(sent.map((r) => hub.waitForFinal(tenant.key, r.notification.id)));
+      expect(done.every((d) => d.notification.status === 'NOTIFICATION_STATUS_SENT' && d.notification.attempts === 1)).toBe(true);
+      const times = done.map((d) => Number(d.notification.sentAt.seconds) * 1000 + d.notification.sentAt.nanos / 1e6).sort((a, b) => a - b);
+      // 1 per 700ms window: the three can't all go out within one window.
+      expect(times[2] - times[0]).toBeGreaterThanOrEqual(600);
+    });
+
+    it('a provider at its limit spills over to the next one', async () => {
+      await provider({ name: 'sms-capped', priority: 1, limits: { rateMax: 1, rateDurationMs: 60_000 } });
+      await provider({ name: 'sms-overflow', priority: 2 });
+      const sent = await Promise.all([1, 2, 3].map((i) => send(sms(`spill ${i}`))));
+      const done = await Promise.all(sent.map((r) => hub.waitForFinal(tenant.key, r.notification.id)));
+      const byProvider = done.map((d) => d.notification.providerName).sort();
+      expect(byProvider).toEqual(['sms-capped', 'sms-overflow', 'sms-overflow']);
+    });
+
+    it('validates limits', async () => {
+      await hub.expectError(
+        providers('CreateProvider', { channel: 'CHANNEL_SMS', provider: 'console', name: 'bad-limits', limits: { rateMax: 5 } }),
+        status.INVALID_ARGUMENT,
+        'PROVIDER_CONFIG_INVALID',
+      );
+    });
+  });
+
   describe('4. gRPC health checking', () => {
     it('reports SERVING through grpc.health.v1', async () => {
       const definition = protoLoader.loadSync(PROTO_FILES, PROTO_LOADER_OPTIONS);

@@ -19,6 +19,7 @@ import {
 import type { Relation } from 'typeorm';
 import { NotificationChannel, ProviderKind } from '../constant/index.js';
 import { ENCRYPTED, encryptedJson } from '../utils/crypto/encrypted.transformer.js';
+import type { ProviderLimits } from '../modules/provider/provider-limits.js';
 import { Tenant } from './tenant.model.js';
 
 @Entity('provider_configs')
@@ -60,6 +61,10 @@ export class ProviderConfig {
   // settings.from stays the default; a send picks one of these by name.
   @Column({ name: 'from_addresses', type: 'jsonb', default: () => "'{}'::jsonb" })
   fromAddresses: Record<string, string>;
+
+  // Delivery limits for this provider (retries, rate, concurrency); see provider-limits.ts.
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb" })
+  limits: ProviderLimits;
 
   // Secrets (passwords, API keys, service accounts). Encrypted at rest.
   @Column({ type: 'text', transformer: encryptedJson(ENCRYPTED.PROVIDER_CREDENTIALS) })

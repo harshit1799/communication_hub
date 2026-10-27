@@ -4,6 +4,7 @@
 
 import { ProviderChannel, ProviderKind } from '../../constant/index.js';
 import type { ChannelProvider } from '../../utils/channel/channel.types.js';
+import type { ProviderLimits } from './provider-limits.js';
 
 /**
  * A provider config as cached in Redis. Credentials stay encrypted in the
@@ -19,6 +20,8 @@ export interface ProviderSpec {
   settings: Record<string, string>;
   // Named From addresses (name -> address).
   fromAddresses: Record<string, string>;
+  // Retries / rate / concurrency limits ({} = platform defaults).
+  limits: ProviderLimits;
   // Ciphertext (FieldCipher); null for the platform default (env config).
   credentials: string | null;
   // Changes whenever the config changes: a new version gets a new client.

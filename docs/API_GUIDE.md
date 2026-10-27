@@ -135,6 +135,7 @@ Twilio or SNS for SMS, Firebase for push. Each provider has:
 | `settings` | non-secret options, incl. **`from`**: the default address it sends from | `{ "region": "eu-west-1", "from": "Acme <no-reply@acme.com>" }` |
 | `fromAddresses` | more addresses on the same account, each with a **name** you send with | `{ "billing": "Acme Billing <billing@acme.com>" }` |
 | `priority` | failover order, lower first (default 100) | `1` |
+| `limits` | retries, rate limit and concurrency for this provider (optional) | `{ "rateMax": 20, "rateDurationMs": 1000, "maxAttempts": 3 }` |
 
 A tenant can add **several providers per channel**: they are tried in priority order and a
 temporary failure on one **fails over** to the next. At send time the hub reads them from Redis
@@ -295,6 +296,57 @@ Invalid configs are rejected before anything is stored, with every problem liste
     "from_addresses.Billing is not a valid email address" ] } }
 ```
 
+### Limits: retries, rate and concurrency per provider
+
+Each provider can carry its own delivery limits. They replace the env values
+(`QUEUE_ATTEMPTS`, `QUEUE_BACKOFF_MS`, the per-channel `*_RATE_MAX`) for the messages that
+provider delivers, and change without a restart:
+
+```bash
+curl -X POST $BASE/providers -H 'Content-Type: application/json' -H "x-api-key: $API_KEY" \
+  -d '{
+    "channel": "CHANNEL_EMAIL", "provider": "smtp", "name": "gmail-smtp", "priority": 1,
+    "settings": { "host": "smtp.gmail.com", "port": "587", "secure": "false", "from": "Acme <forgotpass010@gmail.com>" },
+    "credentials": { "user": "forgotpass010@gmail.com", "pass": "<APP_PASSWORD>" },
+    "limits": { "rateMax": 20, "rateDurationMs": 1000, "maxConcurrency": 5, "maxAttempts": 3, "backoffMs": 2000 }
+  }'
+```
+
+The response carries the limits back:
+`"limits": { "rateMax": 20, "rateDurationMs": 1000, "maxConcurrency": 5, "maxAttempts": 3, "backoffMs": 2000 }`.
+
+| Limit | Range | Effect |
+| --- | --- | --- |
+| `rateMax` + `rateDurationMs` | 1-100,000 per 100 ms-1 h (set both) | at most `rateMax` sends per window through this provider, counted across all workers |
+| `maxConcurrency` | 1-1,000 | at most this many sends in flight to this provider at once, across all workers |
+| `maxAttempts` | 1-20 | delivery attempts per message (1 = no retry) |
+| `backoffMs` | 100 ms-1 h | first retry delay; doubles each attempt, with jitter |
+
+How they work:
+
+- **Rate / concurrency:** a provider at its limit is **skipped for the next provider** in
+  priority order. If every provider that can send the message is at its limit, the message
+  **waits until a slot frees** (it is re-queued as `delayed`) and **no attempt is used**.
+- **Retries:** `maxAttempts` / `backoffMs` come from the first provider that will deliver the
+  message (after From selection, §4) and are fixed when it is queued. The send response
+  shows them: `"queue": { ..., "maxAttempts": 3 }` (§7).
+- **Defaults:** a provider without limits uses `QUEUE_ATTEMPTS` / `QUEUE_BACKOFF_MS` and no
+  per-provider rate or concurrency cap.
+- **Still in env** (deployment settings, not vendor limits): `*_WORKER_CONCURRENCY`, how
+  many jobs one worker process handles at once, and `*_RATE_MAX`, a platform-wide ceiling per
+  channel across all tenants.
+
+Update with `PATCH`: given fields replace the stored ones, `0` removes a limit:
+
+```bash
+curl -X PATCH $BASE/providers/<PROVIDER_ID> -H 'Content-Type: application/json' -H "x-api-key: $API_KEY" \
+  -d '{ "limits": { "maxConcurrency": 0, "maxAttempts": 5 } }'
+# → "limits": { "rateMax": 20, "rateDurationMs": 1000, "maxAttempts": 5, "backoffMs": 2000 }
+```
+
+Invalid limits are rejected, e.g. `400 PROVIDER_CONFIG_INVALID`:
+*"limits.rateMax and limits.rateDurationMs must be set together"*.
+
 ### Manage providers
 
 | Action | Request |
@@ -309,6 +361,7 @@ Invalid configs are rejected before anything is stored, with every problem liste
 | List every From | `GET $BASE/from-addresses?channel=CHANNEL_EMAIL` |
 | Change settings (merged; `""` removes a key) | `PATCH $BASE/providers/<PROVIDER_ID>` `{ "settings": { "host": "smtp2.acme.com" } }` |
 | Rotate credentials (replaced) | `PATCH $BASE/providers/<PROVIDER_ID>` `{ "credentials": { "user": "...", "pass": "..." } }` |
+| Set / change / remove limits | `PATCH $BASE/providers/<PROVIDER_ID>` `{ "limits": { "rateMax": 10, "rateDurationMs": 1000 } }` · `{ "limits": { "rateMax": 0, "rateDurationMs": 0 } }` |
 | Delete | `DELETE $BASE/providers/<PROVIDER_ID>` → `204` |
 
 A channel with no active providers falls back to the platform default from `.env`.
@@ -439,9 +492,9 @@ The response tells you where the message is **right now**:
 | `notification.status` | the stored status (`QUEUED` at accept time; the source of truth, read it later with `GET /notifications/{id}`) |
 | `attempts` | delivery attempts so far: always `[]` for a new send (delivery happens in the background); the real history on a replay |
 | `queue.queue` / `queue.jobId` | the delivery queue (one per channel) and the job id (= the notification id) |
-| `queue.state` | `waiting` · `prioritized` (waiting, ordered by priority) · `delayed` (scheduled, or waiting for a retry) · `active` (being delivered now) · `completed` · `failed` · `not_enqueued` (the push to the queue failed; the sweeper enqueues it within ~3 minutes) · `removed` (finished jobs are pruned after an hour) |
+| `queue.state` | `waiting` · `prioritized` (waiting, ordered by priority) · `delayed` (scheduled, waiting for a retry, or waiting for a provider at its limit) · `active` (being delivered now) · `completed` · `failed` · `not_enqueued` (the push to the queue failed; the sweeper enqueues it within ~3 minutes) · `removed` (finished jobs are pruned after an hour) |
 | `queue.priority` | `1` high · `5` normal · `10` low (lower goes first) |
-| `queue.attemptsMade` / `queue.maxAttempts` | attempts made / allowed before the message fails (`QUEUE_ATTEMPTS`) |
+| `queue.attemptsMade` / `queue.maxAttempts` | attempts made / allowed before the message fails (the provider's `limits.maxAttempts`, else `QUEUE_ATTEMPTS`) |
 | `queue.runAt` | when a `delayed` job runs: exact for scheduled sends, approximate during retry backoff |
 
 A fast worker can already show `active` or `completed` in the send response. `queue` is left

@@ -18,6 +18,7 @@ import { EmailProcessor, InAppProcessor, PushProcessor, SmsProcessor } from './n
 import { NotificationQueue } from './notification.queue.js';
 import { NotificationRepository } from './notification.repository.js';
 import { NotificationService } from './notification.service.js';
+import { RetryPolicyService } from './retry-policy.service.js';
 import { WorkerLifecycle } from './worker-lifecycle.js';
 
 // Worker side. Registered in every role; WorkerLifecycle decides at startup
@@ -34,7 +35,7 @@ const workers = [NotificationDispatcher, EmailProcessor, SmsProcessor, PushProce
     InboxModule,
   ],
   controllers: [NotificationController],
-  providers: [NotificationRepository, NotificationAttemptRepository, NotificationQueue, NotificationService, ...workers],
+  providers: [NotificationRepository, NotificationAttemptRepository, NotificationQueue, NotificationService, RetryPolicyService, ...workers],
   exports: [NotificationQueue],
 })
 export class NotificationModule {}

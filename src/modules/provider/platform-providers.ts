@@ -35,6 +35,8 @@ export function platformProviders(app: AppConfig): Record<ProviderChannel, Platf
     settings,
     // The platform default has no named addresses (only MAIL_FROM / vendor default).
     fromAddresses: {},
+    // Env-configured: QUEUE_ATTEMPTS / QUEUE_BACKOFF_MS and the channel ceilings apply.
+    limits: {},
     credentials: null,
     // Env config only changes with a restart.
     version: 'env',

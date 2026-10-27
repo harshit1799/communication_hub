@@ -11,11 +11,12 @@ import { ProviderConfigService } from './provider-config.service.js';
 import { ProviderController } from './provider.controller.js';
 import { ProviderRegistry } from './provider.registry.js';
 import { ProviderResolver } from './provider.resolver.js';
+import { ProviderThrottle } from './provider-throttle.js';
 
 @Module({
   imports: [TypeOrmModule.forFeature([ProviderConfig])],
   controllers: [ProviderController],
-  providers: [ProviderConfigRepository, ProviderConfigService, ProviderRegistry, ProviderResolver],
-  exports: [ProviderResolver, ProviderConfigRepository],
+  providers: [ProviderConfigRepository, ProviderConfigService, ProviderRegistry, ProviderResolver, ProviderThrottle],
+  exports: [ProviderResolver, ProviderConfigRepository, ProviderThrottle],
 })
 export class ProviderModule {}

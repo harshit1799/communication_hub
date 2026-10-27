@@ -14,7 +14,11 @@
  * Errors: PermanentDeliveryError -> failed now (UnrecoverableError stops
  * BullMQ retries; no failover: another vendor would reject it too). Any
  * other error -> next provider; when all failed -> retrying, rethrown so
- * BullMQ retries with exponential backoff; on the last attempt -> failed.
+ * BullMQ retries with the provider's backoff; on the last attempt -> failed.
+ *
+ * Limits (ProviderLimits): a provider at its rate / concurrency limit is
+ * skipped for the next one. If none could take the message, it is handed
+ * back and delayed until a slot frees (DelayedError: no attempt is used).
  *
  * In-app (CHANNEL_IN_APP): step 3-4 become "write the inbox row" (the
  * delivery, idempotent per notification), then a best-effort FCM signal to
@@ -28,7 +32,7 @@
 
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Job, UnrecoverableError } from 'bullmq';
+import { DelayedError, Job, UnrecoverableError } from 'bullmq';
 import { AppConfig } from '../../config/configuration.js';
 import { NotificationChannel, NotificationStatus } from '../../constant/index.js';
 import { Notification } from '../../models/index.js';
@@ -47,6 +51,7 @@ import { DeviceRepository } from '../device/device.repository.js';
 import { InboxService } from '../inbox/inbox.service.js';
 import { ProviderResolver } from '../provider/provider.resolver.js';
 import { selectFrom } from '../provider/from-addresses.js';
+import { ProviderThrottle } from '../provider/provider-throttle.js';
 import type { ProviderHandle } from '../provider/provider.types.js';
 import { TemplateService } from '../template/template.service.js';
 import { NotificationAttemptRepository } from './notification-attempt.repository.js';
@@ -77,6 +82,7 @@ export class NotificationDispatcher {
     private readonly providers: ProviderResolver,
     private readonly metrics: MetricsService,
     private readonly inbox: InboxService,
+    private readonly throttle: ProviderThrottle,
     config: ConfigService,
   ) {
     const app = config.getOrThrow<AppConfig>('app');
@@ -90,12 +96,12 @@ export class NotificationDispatcher {
    * Runs in a request context carrying the API request id, so worker logs
    * correlate with the gRPC call that accepted the notification.
    */
-  dispatch(job: Job<NotificationJob>): Promise<void> {
+  dispatch(job: Job<NotificationJob>, token?: string): Promise<void> {
     const { notificationId, requestId } = job.data;
-    return RequestContextStore.run({ requestId: requestId ?? `job-${job.id}` }, () => this.deliverJob(job, notificationId));
+    return RequestContextStore.run({ requestId: requestId ?? `job-${job.id}` }, () => this.deliverJob(job, notificationId, token));
   }
 
-  private async deliverJob(job: Job<NotificationJob>, notificationId: string): Promise<void> {
+  private async deliverJob(job: Job<NotificationJob>, notificationId: string, token?: string): Promise<void> {
     const attempt = await this.notifications.markProcessing(notificationId);
     if (attempt === null) {
       this.logger.debug({ msg: 'Skipping: no longer deliverable', event: 'delivery_skipped', notificationId });
@@ -121,9 +127,31 @@ export class NotificationDispatcher {
     if (n.channel === NotificationChannel.InApp) return this.deliverInApp(n, attempt, prepared, lastAttempt, base);
 
     const { providers } = prepared;
+    // Shortest wait among providers at their limit (rate / concurrency).
+    let throttledForMs: number | undefined;
+    let lastFailure: { provider: string; handle: ProviderHandle; sender: string | null; err: unknown; durationMs: number } | undefined;
+
     for (const [index, handle] of providers.entries()) {
       const provider = handle.spec.provider;
       const sender = prepared.fromFor(handle);
+
+      // Provider at its limit: spill over to the next one.
+      const lease = await this.throttle.acquire(handle.spec);
+      if (!lease.ok) {
+        throttledForMs = Math.min(throttledForMs ?? Infinity, lease.retryAfterMs);
+        this.metrics.throttled.inc({ channel: n.channel, provider, reason: lease.reason });
+        this.logger.debug({
+          msg: `Provider ${handle.spec.name} at its ${lease.reason} limit, skipping`,
+          event: 'provider_throttled',
+          ...base,
+          provider,
+          providerName: handle.spec.name,
+          reason: lease.reason,
+          retryAfterMs: lease.retryAfterMs,
+        });
+        continue;
+      }
+
       const started = Date.now();
       let result: DeliveryResult;
       try {
@@ -131,30 +159,32 @@ export class NotificationDispatcher {
       } catch (err) {
         const durationMs = Date.now() - started;
         this.metrics.deliveryDuration.observe({ channel: n.channel, provider }, durationMs / 1000);
-        const isLast = index === providers.length - 1;
-        if (err instanceof PermanentDeliveryError || isLast) {
+        if (err instanceof PermanentDeliveryError) {
           await this.fail(n, attempt, provider, handle, sender, err, durationMs, lastAttempt, { ...base, providerConfigId: handle.spec.id });
-          if (err instanceof PermanentDeliveryError) {
-            await this.devices.deactivate(n.tenantId, err.invalidTokens);
-            throw new UnrecoverableError(errorMessage(err));
-          }
-          throw err;
+          await this.devices.deactivate(n.tenantId, err.invalidTokens);
+          throw new UnrecoverableError(errorMessage(err));
         }
-        // Transient: hand over to the next provider within this attempt.
+        // Transient: record it and hand over to the next provider within this attempt.
         await this.recordAttempt(n.id, attempt, provider, handle, sender, false, null, errorMessage(err), false, durationMs);
         this.metrics.attempts.inc({ channel: n.channel, provider, outcome: 'transient_error' });
-        this.metrics.failovers.inc({ channel: n.channel, from_provider: provider });
-        this.logger.warn({
-          msg: `Provider ${provider} failed, failing over to ${providers[index + 1].spec.provider}`,
-          event: 'provider_failover',
-          ...base,
-          provider,
-          providerConfigId: handle.spec.id,
-          nextProvider: providers[index + 1].spec.provider,
-          error: errorMessage(err),
-          durationMs,
-        });
+        lastFailure = { provider, handle, sender, err, durationMs };
+        const next = providers[index + 1];
+        if (next) {
+          this.metrics.failovers.inc({ channel: n.channel, from_provider: provider });
+          this.logger.warn({
+            msg: `Provider ${provider} failed, failing over to ${next.spec.provider}`,
+            event: 'provider_failover',
+            ...base,
+            provider,
+            providerConfigId: handle.spec.id,
+            nextProvider: next.spec.provider,
+            error: errorMessage(err),
+            durationMs,
+          });
+        }
         continue;
+      } finally {
+        await lease.release();
       }
 
       // Delivered. Bookkeeping errors below are not delivery failures; if one
@@ -179,6 +209,22 @@ export class NotificationDispatcher {
       });
       return;
     }
+
+    // Some provider was only at its limit: wait for capacity instead of
+    // failing. The claim is handed back and the job delayed; BullMQ does
+    // not count a DelayedError as an attempt.
+    if (throttledForMs !== undefined) {
+      await this.notifications.releaseClaim(n.id);
+      const waitMs = Math.max(throttledForMs, 50);
+      this.logger.log({ msg: `All usable providers at their limit, waiting ${waitMs}ms`, event: 'delivery_throttled', ...base, waitMs });
+      await job.moveToDelayed(Date.now() + waitMs, token);
+      throw new DelayedError();
+    }
+
+    // Every provider failed transiently (each attempt already recorded).
+    const { provider, handle, sender, err, durationMs } = lastFailure!;
+    await this.fail(n, attempt, provider, handle, sender, err, durationMs, lastAttempt, { ...base, providerConfigId: handle.spec.id }, false);
+    throw err;
   }
 
   /**
@@ -228,6 +274,13 @@ export class NotificationDispatcher {
       const unreadCount = await this.inbox.unreadCount(n.tenantId, n.userId!);
       const data = stringifyValues({ ...n.metadata, type: 'inbox', inboxMessageId, notificationId: n.id, unreadCount: String(unreadCount) });
       for (const [index, handle] of providers.entries()) {
+        // Best effort: a push provider at its limit is skipped, never waited for.
+        const lease = await this.throttle.acquire(handle.spec);
+        if (!lease.ok) {
+          this.metrics.throttled.inc({ channel: n.channel, provider: handle.spec.provider, reason: lease.reason });
+          if (index === providers.length - 1) throw new Error(`push providers at their ${lease.reason} limit`);
+          continue;
+        }
         try {
           const client = (await handle.client()) as PushProvider;
           const result = await client.send({ tokens, title: content.subject, body: content.body ?? '', data, silent: !n.alsoPush });
@@ -237,6 +290,8 @@ export class NotificationDispatcher {
         } catch (err) {
           if (err instanceof PermanentDeliveryError) await this.devices.deactivate(n.tenantId, err.invalidTokens);
           if (err instanceof PermanentDeliveryError || index === providers.length - 1) throw err;
+        } finally {
+          await lease.release();
         }
       }
     } catch (err) {
@@ -338,13 +393,17 @@ export class NotificationDispatcher {
     durationMs: number,
     lastAttempt: boolean,
     fields: Record<string, unknown>,
+    // false when the attempt row (and its metric) was already written.
+    record = true,
   ): Promise<void> {
     const message = errorMessage(err);
     const permanent = err instanceof PermanentDeliveryError;
     const status = permanent || lastAttempt ? NotificationStatus.Failed : NotificationStatus.Retrying;
-    await this.recordAttempt(n.id, attempt, provider, handle, sender, false, null, message, permanent, durationMs);
+    if (record) {
+      await this.recordAttempt(n.id, attempt, provider, handle, sender, false, null, message, permanent, durationMs);
+      this.metrics.attempts.inc({ channel: n.channel, provider, outcome: permanent ? 'permanent_error' : 'transient_error' });
+    }
     await this.notifications.markFailure(n.id, status, provider, message, handle?.spec.name ?? null);
-    this.metrics.attempts.inc({ channel: n.channel, provider, outcome: permanent ? 'permanent_error' : 'transient_error' });
     if (status === NotificationStatus.Failed) this.metrics.finished.inc({ channel: n.channel, status });
     else this.metrics.retries.inc({ channel: n.channel });
     this.logger.warn({

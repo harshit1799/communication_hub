@@ -5,6 +5,7 @@
 
 import { IsBoolean, IsEnum, IsInt, IsNotEmpty, IsObject, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min } from 'class-validator';
 import { NotificationChannel } from '../constant/index.js';
+import type { ProviderLimits } from '../modules/provider/provider-limits.js';
 
 const NAME = /^[a-z0-9][a-z0-9-]{0,98}[a-z0-9]$/;
 const NAME_MESSAGE = { message: 'name must be 2-100 lowercase letters, digits or dashes' };
@@ -34,6 +35,10 @@ export class CreateProviderDto {
   // Named From addresses: { billing: "Acme Billing <billing@acme.com>", ... }.
   @IsObject()
   fromAddresses: Record<string, string>;
+
+  // Retries / rate / concurrency for this provider (validated by validateLimits).
+  @IsObject()
+  limits: ProviderLimits;
 }
 
 export class UpdateProviderDto {
@@ -69,6 +74,11 @@ export class UpdateProviderDto {
   @IsOptional()
   @IsObject()
   fromAddresses?: Record<string, string>;
+
+  // Given fields replace the stored ones; 0 removes a limit.
+  @IsOptional()
+  @IsObject()
+  limits?: ProviderLimits;
 }
 
 export class ListProvidersDto {

@@ -7,7 +7,7 @@
 
 import 'reflect-metadata';
 import { ConfigService } from '@nestjs/config';
-import { Job, UnrecoverableError } from 'bullmq';
+import { DelayedError, Job, UnrecoverableError } from 'bullmq';
 import { NotificationChannel, NotificationStatus, ProviderKind } from '../../constant/index.js';
 import { Notification } from '../../models/index.js';
 import { PermanentDeliveryError } from '../../utils/channel/channel.types.js';
@@ -17,6 +17,7 @@ import { TemplateRenderer } from '../../utils/template/template-renderer.js';
 import { DeviceRepository } from '../device/device.repository.js';
 import { InboxService } from '../inbox/inbox.service.js';
 import { ProviderResolver } from '../provider/provider.resolver.js';
+import { ProviderThrottle } from '../provider/provider-throttle.js';
 import type { ProviderHandle } from '../provider/provider.types.js';
 import { TemplateRepository } from '../template/template.repository.js';
 import { TemplateService } from '../template/template.service.js';
@@ -59,6 +60,7 @@ function setup(notification: Partial<Notification>, options: { providers?: FakeC
     findWithTenant: vi.fn().mockResolvedValue(row),
     markSent: vi.fn(),
     markFailure: vi.fn(),
+    releaseClaim: vi.fn(),
   };
   const attempts = { record: vi.fn() };
   const devices = { activeTokens: vi.fn().mockResolvedValue([]), deactivate: vi.fn() };
@@ -81,6 +83,8 @@ function setup(notification: Partial<Notification>, options: { providers?: FakeC
     config,
   );
   const metrics = new MetricsService();
+  // Every provider has room unless a test says otherwise.
+  const throttle = { acquire: vi.fn().mockResolvedValue({ ok: true, release: () => Promise.resolve() }) };
   const inbox = {
     deliver: vi.fn().mockResolvedValue({ id: 'inbox-1' }),
     unreadCount: vi.fn().mockResolvedValue(3),
@@ -94,14 +98,17 @@ function setup(notification: Partial<Notification>, options: { providers?: FakeC
     providers as unknown as ProviderResolver,
     metrics,
     inbox as unknown as InboxService,
+    throttle as unknown as ProviderThrottle,
     config,
   );
-  return { dispatcher, notifications, attempts, devices, providers, templateRepo, clients, metrics, inbox };
+  return { dispatcher, notifications, attempts, devices, providers, templateRepo, clients, metrics, inbox, throttle };
 }
 
 /** A minimal BullMQ job: attempts made so far and the attempt limit. */
 const job = (attemptsMade = 0, attempts = 3) =>
-  ({ id: 'j-1', data: { notificationId: 'n-1', requestId: 'req-1' }, attemptsMade, opts: { attempts } }) as unknown as Job;
+  ({ id: 'j-1', data: { notificationId: 'n-1', requestId: 'req-1' }, attemptsMade, opts: { attempts }, moveToDelayed: vi.fn() }) as unknown as Job & {
+    moveToDelayed: ReturnType<typeof vi.fn>;
+  };
 
 const sms = { channel: NotificationChannel.Sms, recipient: '+14155550123', body: 'hi' };
 
@@ -254,6 +261,51 @@ describe('NotificationDispatcher', () => {
     t.notifications.markSent.mockRejectedValue(new Error('db down'));
     await expect(t.dispatcher.dispatch(job())).rejects.toThrow('db down');
     expect(t.notifications.markFailure).not.toHaveBeenCalled();
+  });
+
+  describe('provider limits', () => {
+    const limited = (retryAfterMs: number, reason = 'rate') => ({ ok: false, reason, retryAfterMs });
+
+    it('a provider at its limit is skipped for the next one', async () => {
+      const t = setup(sms, { providers: [client('twilio'), client('sns')] });
+      t.throttle.acquire.mockResolvedValueOnce(limited(800));
+      await t.dispatcher.dispatch(job());
+      expect(t.clients[0].send).not.toHaveBeenCalled();
+      expect(t.notifications.markSent).toHaveBeenCalledWith('n-1', 'sns', 'sns-1', expect.any(Object));
+    });
+
+    it('all providers at their limit: the job waits, without using an attempt', async () => {
+      const t = setup(sms, { providers: [client('twilio'), client('sns')] });
+      t.throttle.acquire.mockResolvedValueOnce(limited(800)).mockResolvedValueOnce(limited(300, 'concurrency'));
+      const j = job();
+      const before = Date.now();
+      await expect(t.dispatcher.dispatch(j, 'token-1')).rejects.toBeInstanceOf(DelayedError);
+      expect(t.notifications.releaseClaim).toHaveBeenCalledWith('n-1');
+      const [runAt, token] = j.moveToDelayed.mock.calls[0];
+      expect(token).toBe('token-1');
+      expect(runAt).toBeGreaterThanOrEqual(before + 300);
+      expect(runAt).toBeLessThan(before + 800);
+      expect(t.notifications.markFailure).not.toHaveBeenCalled();
+      expect(t.attempts.record).not.toHaveBeenCalled();
+    });
+
+    it('one provider failed and the rest are at their limit: wait rather than fail', async () => {
+      const t = setup(sms, { providers: [client('twilio'), client('sns')] });
+      t.clients[0].send.mockRejectedValue(new Error('503'));
+      t.throttle.acquire.mockResolvedValueOnce({ ok: true, release: () => Promise.resolve() }).mockResolvedValueOnce(limited(500));
+      await expect(t.dispatcher.dispatch(job())).rejects.toBeInstanceOf(DelayedError);
+      expect(t.attempts.record).toHaveBeenCalledWith(expect.objectContaining({ provider: 'twilio', success: false }));
+      expect(t.notifications.markFailure).not.toHaveBeenCalled();
+    });
+
+    it('releases the concurrency lease after the call, also on failure', async () => {
+      const t = setup(sms, { providers: [client('twilio')] });
+      const release = vi.fn().mockResolvedValue(undefined);
+      t.throttle.acquire.mockResolvedValue({ ok: true, release });
+      t.clients[0].send.mockRejectedValue(new Error('boom'));
+      await expect(t.dispatcher.dispatch(job())).rejects.toThrow('boom');
+      expect(release).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('in-app', () => {

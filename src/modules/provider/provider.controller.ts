@@ -7,10 +7,11 @@ import { Controller } from '@nestjs/common';
 import { GrpcMethod, Payload } from '@nestjs/microservices';
 import { CurrentTenant, type TenantContext } from '../../decorator/index.js';
 import { CreateProviderDto, ListProvidersDto, ProviderIdDto, UpdateProviderDto } from '../../dto/index.js';
-import { ChannelCodec, compact, nonEmptyMap, Timestamp } from '../../grpc/codecs.js';
+import { ChannelCodec, compact, fieldsOf, nonEmptyMap, Timestamp } from '../../grpc/codecs.js';
 import { validateInput } from '../../grpc/validate.js';
 import { ProviderConfig } from '../../models/index.js';
 import { ProviderConfigService } from './provider-config.service.js';
+import type { ProviderLimits } from './provider-limits.js';
 
 const SERVICE = 'ProviderService';
 
@@ -25,6 +26,7 @@ export function toProtoProvider(p: ProviderConfig) {
     active: p.isActive,
     settings: p.settings,
     fromAddresses: p.fromAddresses ?? {},
+    limits: compact({ ...(p.limits ?? {}) }),
     credentialKeys: Object.keys(p.credentials ?? {}).sort(),
     createdAt: Timestamp.encode(p.createdAt),
     updatedAt: Timestamp.encode(p.updatedAt),
@@ -39,6 +41,7 @@ interface ProtoCreate {
   settings?: Record<string, string>;
   credentials?: Record<string, string>;
   fromAddresses?: Record<string, string>;
+  limits?: ProviderLimits;
 }
 
 @Controller()
@@ -54,6 +57,7 @@ export class ProviderController {
       settings: req.settings ?? {},
       credentials: req.credentials ?? {},
       fromAddresses: req.fromAddresses ?? {},
+      limits: fieldsOf(req.limits),
     });
     return toProtoProvider(await this.providers.create(tenant.tenantId, dto));
   }
@@ -78,6 +82,7 @@ export class ProviderController {
         settings: nonEmptyMap(req.settings),
         credentials: nonEmptyMap(req.credentials),
         fromAddresses: nonEmptyMap(req.fromAddresses),
+        limits: req.limits ? fieldsOf(req.limits) : undefined,
       }),
     );
     return toProtoProvider(await this.providers.update(tenant.tenantId, dto));

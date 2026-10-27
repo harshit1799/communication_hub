@@ -30,6 +30,7 @@ import { selectFrom } from '../provider/from-addresses.js';
 import { ProviderResolver } from '../provider/provider.resolver.js';
 import { TemplateService } from '../template/template.service.js';
 import { NotificationQueue, QueueSnapshot } from './notification.queue.js';
+import { RetryPolicyService } from './retry-policy.service.js';
 import { NewNotification, NotificationRepository } from './notification.repository.js';
 
 /** One day in milliseconds (scheduling limit). */
@@ -58,6 +59,7 @@ export class NotificationService {
     private readonly providers: ProviderResolver,
     private readonly cipher: FieldCipher,
     private readonly metrics: MetricsService,
+    private readonly retryPolicies: RetryPolicyService,
     config: ConfigService,
   ) {
     this.maxAttempts = config.getOrThrow<AppConfig>('app').queue.attempts;
@@ -114,7 +116,7 @@ export class NotificationService {
     }
     // try/await (not .catch): also covers errors thrown synchronously.
     try {
-      await this.queue.ensureEnqueued(n, requestId);
+      await this.queue.ensureEnqueued(n, requestId, await this.retryPolicies.forNotification(n));
     } catch (err) {
       this.logger.error(`Enqueue failed for ${n.id}, sweeper will retry: ${errorMessage(err)}`);
     }
@@ -174,7 +176,8 @@ export class NotificationService {
     // try/await (not .catch) also covers errors thrown synchronously.
     if (inserted.length > 0) {
       try {
-        await this.queue.enqueue(inserted, requestId);
+        const policies = await this.retryPolicies.forMany(inserted);
+        await this.queue.enqueue(inserted, requestId, (n) => policies.get(n as Notification));
       } catch (err) {
         this.logger.error(`Enqueue failed for ${inserted.length} notifications, sweeper will retry: ${errorMessage(err)}`);
       }

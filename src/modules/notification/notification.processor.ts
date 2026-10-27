@@ -31,8 +31,9 @@ abstract class ChannelProcessor extends WorkerHost {
   }
 
   /** Called by BullMQ for every job; delegates to the dispatcher. */
-  process(job: Job<NotificationJob>): Promise<void> {
-    return this.dispatcher.dispatch(job);
+  process(job: Job<NotificationJob>, token?: string): Promise<void> {
+    // The token lets the dispatcher re-delay the job when providers are at their limits.
+    return this.dispatcher.dispatch(job, token);
   }
 
   // Created lazily: `logger` is a subclass field, set after this constructor.

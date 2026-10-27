@@ -484,7 +484,7 @@
     },
     {
       "type": "timeseries",
-      "title": "Provider failovers",
+      "title": "Provider failovers and throttling",
       "description": "",
       "id": 12,
       "datasource": {
@@ -525,6 +525,15 @@
           "expr": "sum by (channel, from_provider) (rate(chub_provider_failovers_total[5m]))",
           "legendFormat": "{{channel}} from {{from_provider}}",
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (channel, provider, reason) (rate(chub_provider_throttled_total[5m]))",
+          "legendFormat": "throttled {{provider}} {{reason}}",
+          "refId": "B"
         }
       ]
     },

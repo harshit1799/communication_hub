@@ -90,6 +90,12 @@ export class MetricsService {
     help: 'Expired inbox messages deleted by the maintenance queue',
     registers: [this.registry],
   });
+  readonly throttled = new Counter({
+    name: 'chub_provider_throttled_total',
+    help: 'Sends held back by a provider limit (spilled to the next provider or delayed): reason rate | concurrency',
+    labelNames: ['channel', 'provider', 'reason'] as const,
+    registers: [this.registry],
+  });
   readonly requeued = new Counter({
     name: 'chub_sweeper_requeued_total',
     help: 'Stuck notifications re-enqueued by the maintenance sweeper',

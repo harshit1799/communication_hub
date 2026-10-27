@@ -26,6 +26,13 @@
 //                    sending as { support: ..., billing: ..., alerts: ... }
 // A send picks one by name (NotificationInput.from = "billing"): only providers
 // that have that name are used, each sending as its own address for it.
+//
+// Limits (ProviderLimits, all optional) replace the platform env defaults for
+// messages this provider delivers: retries (max_attempts, backoff_ms, taken from
+// the first provider that will deliver a message, set when it is queued), and a
+// rate limit and a concurrency cap enforced across all workers in Redis. A
+// provider at its limit is skipped for the next one; if all are, the message
+// waits (without using an attempt) until one has room.
 syntax = "proto3";
 
 package communication_hub.v1;
@@ -89,6 +96,21 @@ message Provider {
   google.protobuf.Timestamp updated_at = 10;
   // Named From addresses: name (lowercase letters, digits, dashes) -> address.
   map<string, string> from_addresses = 11;
+  ProviderLimits limits = 12;
+}
+
+// Per-provider delivery limits. Unset fields use the platform defaults
+// (QUEUE_ATTEMPTS, QUEUE_BACKOFF_MS; no per-provider rate / concurrency cap).
+message ProviderLimits {
+  // At most rate_max messages per rate_duration_ms through this provider
+  // (e.g. Gmail: 20 per 1000 ms). Set both or neither.
+  optional int32 rate_max = 1;
+  optional int32 rate_duration_ms = 2;
+  // At most this many sends in flight to this provider at once.
+  optional int32 max_concurrency = 3;
+  // Delivery attempts per message (1 = no retry) and the exponential backoff base.
+  optional int32 max_attempts = 4;
+  optional int32 backoff_ms = 5;
 }
 
 message CreateProviderRequest {
@@ -100,6 +122,7 @@ message CreateProviderRequest {
   map<string, string> settings = 5;
   map<string, string> credentials = 6;
   map<string, string> from_addresses = 7;
+  ProviderLimits limits = 8;
 }
 
 message ListProvidersRequest {
@@ -125,6 +148,8 @@ message UpdateProviderRequest {
   map<string, string> credentials = 6;
   // Merged into the stored names ("" removes a name).
   map<string, string> from_addresses = 7;
+  // Fields given replace the stored ones; 0 removes a limit (back to the default).
+  ProviderLimits limits = 8;
 }
 
 message ListFromAddressesRequest {

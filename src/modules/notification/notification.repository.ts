@@ -121,6 +121,18 @@ export class NotificationRepository extends BaseRepository<Notification> {
     return row?.attempts ?? null;
   }
 
+  /**
+   * processing -> queued, attempts - 1: the claim is handed back because
+   * every provider is at its limit (the job waits; no attempt was used).
+   */
+  async releaseClaim(id: string): Promise<void> {
+    await this.rawQuery(
+      `UPDATE notifications SET status = $2, attempts = GREATEST(attempts - 1, 0), updated_at = now()
+        WHERE id = $1 AND status = $3`,
+      [id, NotificationStatus.Queued, NotificationStatus.Processing],
+    );
+  }
+
   /** processing -> sent, with the vendor's message id, the From used and the provider config name. */
   async markSent(
     id: string,
@@ -166,7 +178,14 @@ export class NotificationRepository extends BaseRepository<Notification> {
    * claiming the same rows.
    */
   async claimStuck(olderThan: Date, limit: number): Promise<Notification[]> {
-    const rows = await this.rawQuery<{ id: string; channel: string; priority: string; scheduled_at: Date | null }>(
+    const rows = await this.rawQuery<{
+      id: string;
+      tenant_id: string;
+      channel: string;
+      priority: string;
+      scheduled_at: Date | null;
+      from_address: string | null;
+    }>(
       `UPDATE notifications SET updated_at = now()
         WHERE id IN (
           SELECT id FROM notifications
@@ -176,15 +195,17 @@ export class NotificationRepository extends BaseRepository<Notification> {
            ORDER BY updated_at
            LIMIT $3
            FOR UPDATE SKIP LOCKED)
-    RETURNING id, channel, priority, scheduled_at`,
+    RETURNING id, tenant_id, channel, priority, scheduled_at, from_address`,
       [IN_FLIGHT_STATUSES, olderThan, limit],
     );
     return rows.map((r) =>
       this.repository.create({
         id: r.id,
+        tenantId: r.tenant_id,
         channel: r.channel as Notification['channel'],
         priority: r.priority as Notification['priority'],
         scheduledAt: r.scheduled_at,
+        fromAddress: r.from_address,
       }),
     );
   }

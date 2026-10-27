@@ -10,6 +10,7 @@ import { JobsOptions, Queue } from 'bullmq';
 import { CHANNEL_QUEUE, IN_FLIGHT_STATUSES, NotificationChannel, QUEUE_PRIORITY } from '../../constant/index.js';
 import { Notification } from '../../models/index.js';
 import { MetricsService } from '../../utils/metrics/metrics.service.js';
+import type { RetryPolicy } from './retry-policy.service.js';
 
 /** Payload of a delivery job. Postgres holds everything else. */
 export interface NotificationJob {
@@ -75,8 +76,11 @@ export class NotificationQueue implements OnModuleInit {
     );
   }
 
-  /** Enqueues notifications in one round trip per channel. */
-  async enqueue(notifications: Enqueueable[], requestId?: string): Promise<void> {
+  /**
+   * Enqueues notifications in one round trip per channel. `policyOf` gives
+   * each job its provider's retry policy (else the queue defaults apply).
+   */
+  async enqueue(notifications: Enqueueable[], requestId?: string, policyOf?: (n: Enqueueable) => RetryPolicy | undefined): Promise<void> {
     const byChannel = new Map<NotificationChannel, Enqueueable[]>();
     for (const n of notifications) {
       byChannel.set(n.channel, [...(byChannel.get(n.channel) ?? []), n]);
@@ -87,7 +91,7 @@ export class NotificationQueue implements OnModuleInit {
           items.map((n) => ({
             name: channel,
             data: { notificationId: n.id, requestId },
-            opts: this.jobOptions(n),
+            opts: this.jobOptions(n, policyOf?.(n)),
           })),
         ),
       ),
@@ -99,7 +103,7 @@ export class NotificationQueue implements OnModuleInit {
    * in Redis (completed/failed) is replaced, otherwise BullMQ would ignore
    * the new one because of the shared id.
    */
-  async ensureEnqueued(n: Enqueueable, requestId?: string): Promise<void> {
+  async ensureEnqueued(n: Enqueueable, requestId?: string, policy?: RetryPolicy): Promise<void> {
     const queue = this.queues[n.channel];
     const job = await queue.getJob(n.id);
     if (job) {
@@ -107,7 +111,7 @@ export class NotificationQueue implements OnModuleInit {
       if (state !== 'completed' && state !== 'failed') return;
       await job.remove();
     }
-    await queue.add(n.channel, { notificationId: n.id, requestId }, this.jobOptions(n));
+    await queue.add(n.channel, { notificationId: n.id, requestId }, this.jobOptions(n, policy));
   }
 
   /** Removes a waiting/delayed job. Active jobs are locked and stay. */
@@ -155,12 +159,17 @@ export class NotificationQueue implements OnModuleInit {
     return Object.values(this.queues);
   }
 
-  /** Job id = notification id (dedup), priority, and delay for scheduled sends. */
-  private jobOptions(n: Enqueueable): JobsOptions {
+  /**
+   * Job id = notification id (dedup), priority, delay for scheduled sends,
+   * and the provider's retry policy when given (exponential backoff with
+   * the same jitter as the queue defaults).
+   */
+  private jobOptions(n: Enqueueable, policy?: RetryPolicy): JobsOptions {
     return {
       jobId: n.id,
       priority: QUEUE_PRIORITY[n.priority],
       delay: n.scheduledAt ? Math.max(0, n.scheduledAt.getTime() - Date.now()) : undefined,
+      ...(policy && { attempts: policy.attempts, backoff: { type: 'exponential', delay: policy.backoffMs, jitter: 0.5 } }),
     };
   }
 }

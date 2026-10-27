@@ -26,6 +26,7 @@ import { MetricsService } from '../../utils/metrics/metrics.service.js';
 import { InboxService } from '../inbox/inbox.service.js';
 import { NotificationQueue } from './notification.queue.js';
 import { NotificationRepository } from './notification.repository.js';
+import { RetryPolicyService } from './retry-policy.service.js';
 
 /** Consumes the maintenance queue (worker processes only). */
 @Processor(MAINTENANCE_QUEUE, { autorun: false })
@@ -38,6 +39,7 @@ export class MaintenanceProcessor extends WorkerHost {
     private readonly queue: NotificationQueue,
     private readonly metrics: MetricsService,
     private readonly inbox: InboxService,
+    private readonly retryPolicies: RetryPolicyService,
     config: ConfigService,
   ) {
     super();
@@ -79,7 +81,7 @@ export class MaintenanceProcessor extends WorkerHost {
     let requeued = 0;
     for (const n of stuck) {
       try {
-        await this.queue.ensureEnqueued(n);
+        await this.queue.ensureEnqueued(n, undefined, await this.retryPolicies.forNotification(n));
         requeued++;
       } catch (err) {
         this.logger.error(`Could not re-enqueue ${n.id}: ${errorMessage(err)}`);

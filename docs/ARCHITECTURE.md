@@ -102,6 +102,22 @@ How the Communication Hub is built and why. Usage is in the [README](../README.m
   call is an attempt row, so the audit shows the whole chain. Permanent errors don't fail over.
   Client creation is lazy per provider, so one malformed config can't block its backups.
 
+### 4b. Delivery limits per provider
+
+- `provider_configs.limits` (`maxAttempts`, `backoffMs`, `rateMax`/`rateDurationMs`,
+  `maxConcurrency`), cached with the provider spec in Redis.
+- **Retries** are a job property, so they are fixed when the job is queued: from the first
+  provider after From selection (`RetryPolicyService`), on send, manual retry and sweeper
+  re-enqueue; env `QUEUE_ATTEMPTS` / `QUEUE_BACKOFF_MS` are the defaults.
+- **Rate and concurrency** are enforced per provider config across all workers by one Lua
+  script (`ProviderThrottle`): a fixed-window counter and a sorted set of expiring leases (a
+  crashed worker's lease frees itself). Hash-tagged keys, so it works on Redis Cluster; fails
+  open if Redis is unavailable.
+- A provider at its limit is skipped (spill-over to the next); if all are, the claim is handed
+  back and the job is re-delayed with `DelayedError`, which BullMQ does not count as an attempt.
+- Worker concurrency and the per-channel queue limiter stay in env: they are deployment
+  capacity and a platform-wide ceiling, not vendor properties.
+
 ### 5. Encryption of personal data
 
 - AES-256-GCM via TypeORM column transformers (`notifications.recipient`, `notifications.data`,
