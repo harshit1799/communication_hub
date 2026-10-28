@@ -570,6 +570,30 @@ curl -X POST $BASE/notifications/bulk -H 'Content-Type: application/json' -H "x-
 state of each, same order). Bulk defaults to
 `PRIORITY_LOW`, so single sends (OTPs) are never delayed by a campaign.
 
+**Same message to many recipients.** One item can name several targets: `recipients` (a list)
+or a comma-separated `recipient` for email addresses, E.164 numbers and push tokens, and
+`userIds` for push and in-app users:
+
+```bash
+curl -X POST $BASE/notifications/bulk -H 'Content-Type: application/json' -H "x-api-key: $API_KEY" \
+  -d '{ "notifications": [
+        { "channel": "CHANNEL_EMAIL", "recipients": ["jane@example.com", "bob@example.com"],
+          "template": "invoice-ready", "data": { "name": "Jane", "invoiceNo": "INV-1042", "amount": "$120" },
+          "from": "billing", "idempotencyKey": "invoice-ready-INV-1042" },
+        { "channel": "CHANNEL_SMS", "recipient": "+919876543210, +919876543211",
+          "template": "otp", "data": { "code": "482913", "expiresInMinutes": 5 } },
+        { "channel": "CHANNEL_PUSH", "userIds": ["user-42", "user-43"], "subject": "Sale", "body": "Sale starts now!" } ] }'
+```
+
+- Each target becomes its own notification with its own id, status and retry. Results come back
+  in order (6 here, so `accepted: 6`), and duplicate targets are dropped.
+- `idempotencyKey` gets a per-recipient suffix (`invoice-ready-INV-1042:<hash>`), so repeating
+  the request replays it instead of sending again.
+- The 500 limit counts notifications after this expansion.
+- Several `recipients` and several `userIds` in the same item is a `VALIDATION_ERROR`.
+- `recipients` and `userIds` are bulk-only: on `POST /notifications` they are a
+  `VALIDATION_ERROR`.
+
 ### Request fields
 
 | Field | Channels | Notes |
@@ -577,6 +601,8 @@ state of each, same order). Bulk defaults to
 | `channel` | all | `CHANNEL_EMAIL` · `CHANNEL_SMS` · `CHANNEL_PUSH` · `CHANNEL_IN_APP` |
 | `recipient` | email, SMS, push | email address · E.164 number · device token |
 | `userId` | push, in-app | your user id: all devices (push) / the user's inbox (in-app, required) |
+| `recipients` | email, SMS, push | bulk only: several recipients, one notification each (`recipient` may also be comma-separated in bulk) |
+| `userIds` | push, in-app | bulk only: several users, one notification each |
 | `template` | all | template name; its active version is pinned on the notification |
 | `templateVersion` | all | send a specific version instead of the active one |
 | `subject` | email, push, in-app | required for email without a template; overrides the template subject |

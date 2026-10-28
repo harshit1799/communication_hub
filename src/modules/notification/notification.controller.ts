@@ -8,6 +8,7 @@
 
 import { Controller } from '@nestjs/common';
 import { GrpcMethod, Payload } from '@nestjs/microservices';
+import { LIMITS } from '../../constant/index.js';
 import { CurrentTenant, type TenantContext } from '../../decorator/index.js';
 import { ListNotificationsDto, NotificationIdDto, SendBulkNotificationDto, SendNotificationDto } from '../../dto/index.js';
 import {
@@ -22,8 +23,11 @@ import {
   Timestamp,
 } from '../../grpc/codecs.js';
 import { validateInput } from '../../grpc/validate.js';
+import { AppException } from '../../exceptions/index.js';
+import { ERROR } from '../../response/response.js';
 import { Notification, NotificationAttempt } from '../../models/index.js';
 import { RequestContextStore } from '../../utils/request-context.js';
+import { expandBulkItem } from './bulk-targets.js';
 import type { QueueSnapshot } from './notification.queue.js';
 import { NotificationService } from './notification.service.js';
 
@@ -45,7 +49,13 @@ interface ProtoNotificationInput {
   idempotencyKey?: string;
   from?: string;
   alsoPush?: boolean;
+  // SendBulkNotifications only (fanned out by expandBulkItem).
+  recipients?: string[];
+  userIds?: string[];
 }
+
+/** VALIDATION_ERROR with one message. */
+const invalid = (message: string) => new AppException(ERROR.VALIDATION_ERROR, { errors: [message] }, { detail: message });
 
 /** Proto input -> plain object for SendNotificationDto validation. */
 function decodeInput(input: ProtoNotificationInput = {}) {
@@ -125,6 +135,9 @@ export class NotificationController {
 
   @GrpcMethod(SERVICE, 'SendNotification')
   async send(@Payload() req: { notification?: ProtoNotificationInput }, @CurrentTenant() tenant: TenantContext) {
+    if (req.notification?.recipients?.length || req.notification?.userIds?.length) {
+      throw invalid('recipients and userIds are only supported by SendBulkNotifications (POST /v1/notifications/bulk)');
+    }
     const dto = validateInput(SendNotificationDto, decodeInput(req.notification));
     const { notification, replayed, attempts, queue } = await this.notifications.send(tenant.tenantId, dto, this.requestId());
     return compact({
@@ -137,7 +150,16 @@ export class NotificationController {
 
   @GrpcMethod(SERVICE, 'SendBulkNotifications')
   async sendBulk(@Payload() req: { notifications?: ProtoNotificationInput[] }, @CurrentTenant() tenant: TenantContext) {
-    const dto = validateInput(SendBulkNotificationDto, { notifications: (req.notifications ?? []).map(decodeInput) });
+    // Each item with several targets becomes one notification per target.
+    const notifications = (req.notifications ?? []).flatMap((input, i) => {
+      const items = expandBulkItem(decodeInput(input));
+      if (typeof items === 'string') throw invalid(`notifications.${i}: ${items}`);
+      return items;
+    });
+    if (notifications.length > LIMITS.BULK_MAX) {
+      throw invalid(`a bulk request can create at most ${LIMITS.BULK_MAX} notifications (this one has ${notifications.length})`);
+    }
+    const dto = validateInput(SendBulkNotificationDto, { notifications });
     const results = await this.notifications.sendBulk(tenant.tenantId, dto.notifications, this.requestId());
     return {
       accepted: results.length,

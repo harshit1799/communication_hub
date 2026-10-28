@@ -1,0 +1,149 @@
+# Flow: IN-APP (inbox) · stored in the hub, signalled through Firebase (fcm)
+#
+# A complete flow on its own tenant: create the tenant, add the provider, (template),
+# send, check which provider and From delivered it.
+#
+# Open in VS Code with the "REST Client" extension (humao.rest-client): click "Send Request"
+# above each request, top to bottom. Ids and the API key are taken from earlier responses
+# automatically. Replace <...> values in bodies with your own (passwords, tokens).
+# {{name}}-style placeholders inside template bodies are Handlebars for the hub: REST Client
+# sends them as they are (it may underline them as unknown variables; that is fine).
+# No REST Client? Copy the method, URL, headers and JSON body into Swagger/Postman.
+
+@baseUrl = http://localhost:3000/api
+@opsUrl = http://localhost:9464
+# ADMIN_API_KEY from your .env
+@ADMIN_KEY = paste-your-ADMIN_API_KEY-here
+# FCM registration token from your app (push / in-app only)
+@FCM_TOKEN = paste-a-device-token-here
+
+### 1 · Check the service is ready
+# Expect {"ready":true}. If 503, start Postgres/Redis.
+# @name r1_check_the_service_is_ready
+GET {{opsUrl}}/health/ready
+
+### 2 · Create a tenant for this flow
+# Admin creates a tenant just for this flow (so only this provider is configured); starter templates
+# otp + welcome are added; the API key is returned once. Already ran this flow? Change the slug (409
+# TENANT_SLUG_TAKEN).
+# @name r2_create_a_tenant_for_this_flow
+POST {{baseUrl}}/v1/admin/tenants
+Content-Type: application/json
+x-admin-key: {{ADMIN_KEY}}
+
+{
+  "name": "Acme Inc.",
+  "slug": "acme-inapp-demo",
+  "settings": { "appName": "Acme" }
+}
+
+### 3 · Add the Firebase provider (optional: only with a real Firebase project)
+# In-app uses the tenant's PUSH providers to tell the app to refresh. Skip it without a real Firebase
+# project: the platform default push provider (console in dev) is used and the inbox still works.
+# @name r3_add_the_firebase_provider_optional_on
+POST {{baseUrl}}/v1/providers
+Content-Type: application/json
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+{
+  "channel": "CHANNEL_PUSH",
+  "provider": "fcm",
+  "name": "firebase",
+  "priority": 1,
+  "credentials": {
+    "service_account": "{\"type\":\"service_account\",\"project_id\":\"acme-app\",\"private_key_id\":\"<PRIVATE_KEY_ID>\",\"private_key\":\"-----BEGIN PRIVATE KEY-----\\n<KEY>\\n-----END PRIVATE KEY-----\\n\",\"client_email\":\"firebase-adminsdk@acme-app.iam.gserviceaccount.com\"}"
+  }
+}
+
+### 4 · Register the user's device
+# As in the push flow.
+# @name r4_register_the_user_s_device
+POST {{baseUrl}}/v1/devices
+Content-Type: application/json
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+{
+  "userId": "user-42",
+  "token": "{{FCM_TOKEN}}",
+  "platform": "DEVICE_PLATFORM_ANDROID"
+}
+
+### 5 · Send in-app + visible push
+# Worker writes the inbox message → FCM to the user's devices (visible push because alsoPush=true).
+# @name r5_send_in_app_visible_push
+POST {{baseUrl}}/v1/notifications
+Content-Type: application/json
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+{
+  "channel": "CHANNEL_IN_APP",
+  "userId": "user-42",
+  "subject": "Invoice ready",
+  "body": "Invoice {{invoiceNo}} for {{amount}} is ready",
+  "data": { "invoiceNo": "INV-1042", "amount": "$120" },
+  "metadata": { "deeplink": "app://invoices/1042" },
+  "alsoPush": true
+}
+
+### 6 · Send in-app with the starter "welcome" template (silent signal)
+# Without alsoPush: inbox message + silent data message (type=inbox, unreadCount) so an open app
+# refreshes its badge.
+# @name r6_send_in_app_with_the_starter_welcome_
+POST {{baseUrl}}/v1/notifications
+Content-Type: application/json
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+{
+  "channel": "CHANNEL_IN_APP",
+  "userId": "user-42",
+  "template": "welcome",
+  "data": { "name": "Jane" }
+}
+
+### 7 · Check delivery
+# status SENT.
+# Path params: notification id = <NOTIFICATION_ID>  (notification.id from a send)
+# @name r7_check_delivery
+GET {{baseUrl}}/v1/notifications/{{r5_send_in_app_visible_push.response.body.$.notification.id}}
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+### 8 · Read the user's inbox
+# Messages + unreadCount.
+# Path params: user_id = user-42  (your user id)
+# Query params: unread_only = true; page.limit = 20
+# @name r8_read_the_user_s_inbox
+GET {{baseUrl}}/v1/users/user-42/inbox?unread_only=true&page.limit=20
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+### 9 · Unread count (badge)
+# { "unreadCount": 2 }
+# Path params: user_id = user-42  (your user id)
+# @name r9_unread_count_badge
+GET {{baseUrl}}/v1/users/user-42/inbox/unread-count
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+### 10 · Mark one read
+# Returns the new unreadCount.
+# Path params: user_id = user-42  (your user id)
+# @name r10_mark_one_read
+POST {{baseUrl}}/v1/users/user-42/inbox/read
+Content-Type: application/json
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+{
+  "ids": ["{{r8_read_the_user_s_inbox.response.body.$.messages[0].id}}"]
+}
+
+### 11 · Mark all read
+# { "unreadCount": 0 }
+# Path params: user_id = user-42  (your user id)
+# @name r11_mark_all_read
+POST {{baseUrl}}/v1/users/user-42/inbox/read-all
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+### 12 · Delete a message
+# Returns the new unreadCount.
+# Path params: user_id = user-42  (your user id); inbox id = <INBOX_MESSAGE_ID>  (messages[0].id from List inbox messages)
+# @name r12_delete_a_message
+DELETE {{baseUrl}}/v1/users/user-42/inbox/{{r8_read_the_user_s_inbox.response.body.$.messages[0].id}}
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}

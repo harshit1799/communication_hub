@@ -1,0 +1,789 @@
+﻿Flow,Step,API,Method,Endpoint,Path params,Query params,Headers,Request body (JSON),What happens,Save from response,Expected status
+API Flow: STEP 0: Check the service  ·  anyone,0.1,Liveness,GET,http://localhost:9464/health/live,-,-,(none),(no body),Ops server answers directly (no DB). Use it to check the process is up.,,200
+API Flow: STEP 0: Check the service  ·  anyone,0.2,Readiness,GET,http://localhost:9464/health/ready,-,-,(none),(no body),"Ops server pings Postgres and Redis. 200 = ready, 503 = a dependency is down.",,200
+API Flow: STEP 0: Check the service  ·  anyone,0.3,Prometheus metrics,GET,http://localhost:9464/metrics,-,-,(none),(no body),"Prometheus metrics (requests, queue depth, deliveries per provider). Scraped by Prometheus, shown in Grafana.",,200
+API Flow: STEP 0: Check the service  ·  anyone,0.4,gRPC health check,gRPC,grpcurl -plaintext localhost:50051 grpc.health.v1.Health/Check,-,-,(none),"{ ""service"": """" }",Standard gRPC health check on :50051.,,
+API Flow: STEP 1: Create the tenant and its API key  ·  Platform admin,1.1,Create tenant,POST,http://localhost:3000/api/v1/admin/tenants,-,-,"Content-Type: application/json
+x-admin-key: <ADMIN_KEY>","{
+  ""name"": ""Acme Inc."",
+  ""slug"": ""acme"",
+  ""settings"": { ""appName"": ""Acme"" }
+}","Admin key checked → tenant row created → starter templates (otp, welcome) copied → first API key generated (only its hash is stored) → key returned ONCE.","tenant.id → TENANT_ID
+apiKey.key → API_KEY",201
+API Flow: STEP 1: Create the tenant and its API key  ·  Platform admin,1.2,List tenants,GET,http://localhost:3000/api/v1/admin/tenants,-,-,x-admin-key: <ADMIN_KEY>,(no body),Admin key checked → all tenants from DB.,,200
+API Flow: STEP 1: Create the tenant and its API key  ·  Platform admin,1.3,Get tenant,GET,http://localhost:3000/api/v1/admin/tenants/<TENANT_ID>,tenant id = <TENANT_ID>  (tenant.id from Create tenant),-,x-admin-key: <ADMIN_KEY>,(no body),Admin key checked → one tenant by id.,,200
+API Flow: STEP 1: Create the tenant and its API key  ·  Platform admin,1.4,"Update tenant (rename, rebrand, deactivate)",PATCH,http://localhost:3000/api/v1/admin/tenants/<TENANT_ID>,tenant id = <TENANT_ID>  (tenant.id from Create tenant),-,"Content-Type: application/json
+x-admin-key: <ADMIN_KEY>","{
+  ""name"": ""Acme Corporation"",
+  ""settings"": { ""appName"": ""Acme Corp"" },
+  ""active"": true
+}","Admin key checked → given fields updated, settings merged → tenant cache cleared. active=false blocks every key of the tenant.",,200
+API Flow: STEP 1: Create the tenant and its API key  ·  Platform admin,1.5,Create another API key,POST,http://localhost:3000/api/v1/admin/tenants/<TENANT_ID>/api-keys,tenant id = <TENANT_ID>  (tenant.id from Create tenant),-,"Content-Type: application/json
+x-admin-key: <ADMIN_KEY>","{
+  ""name"": ""backend-prod"",
+  ""expiresAt"": ""2027-12-31T00:00:00Z""
+}","Admin key checked → new key generated, hash stored → key returned ONCE.",apiKey.id → KEY_ID,201
+API Flow: STEP 1: Create the tenant and its API key  ·  Platform admin,1.6,List API keys,GET,http://localhost:3000/api/v1/admin/tenants/<TENANT_ID>/api-keys,tenant id = <TENANT_ID>  (tenant.id from Create tenant),-,x-admin-key: <ADMIN_KEY>,(no body),"Admin key checked → the tenant's keys (prefix only, never the key).",,200
+API Flow: STEP 2: Add providers and From addresses  ·  Tenant,2.0a,Create demo email provider (console),POST,http://localhost:3000/api/v1/providers,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_EMAIL"",
+  ""provider"": ""console"",
+  ""name"": ""demo-email"",
+  ""priority"": 1,
+  ""settings"": { ""from"": ""Acme <no-reply@acme.com>"" },
+  ""fromAddresses"": {
+    ""billing"": ""Acme Billing <billing@acme.com>"",
+    ""support"": ""Acme Support <support@acme.com>""
+  },
+  ""limits"": { ""rateMax"": 20, ""rateDurationMs"": 1000, ""maxAttempts"": 3, ""backoffMs"": 2000 }
+}","API key → tenant → config validated (vendor rules, From names) → saved in provider_configs (credentials encrypted) → Redis cache providers:<tenant>:CHANNEL_EMAIL refreshed → next email uses it.",id → PROVIDER_ID,201
+API Flow: STEP 2: Add providers and From addresses  ·  Tenant,2.0b,Create demo SMS provider (console),POST,http://localhost:3000/api/v1/providers,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_SMS"",
+  ""provider"": ""console"",
+  ""name"": ""demo-sms"",
+  ""priority"": 1,
+  ""settings"": { ""from"": ""+14155550100"" },
+  ""fromAddresses"": { ""india"": ""ACMEIN"" }
+}",Same as 2.0a for CHANNEL_SMS.,,201
+API Flow: STEP 2: Add providers and From addresses  ·  Tenant,2.1,Create provider,POST,http://localhost:3000/api/v1/providers,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_EMAIL"",
+  ""provider"": ""smtp"",
+  ""name"": ""smtp-main"",
+  ""priority"": 1,
+  ""settings"": { ""host"": ""smtp.acme.com"", ""port"": ""587"", ""secure"": ""false"", ""from"": ""Acme <no-reply@acme.com>"" },
+  ""credentials"": { ""user"": ""mailer@acme.com"", ""pass"": ""<SMTP_PASSWORD>"" },
+  ""fromAddresses"": {
+    ""support"": ""Acme Support <support@acme.com>"",
+    ""billing"": ""Acme Billing <billing@acme.com>""
+  },
+  ""limits"": { ""rateMax"": 20, ""rateDurationMs"": 1000, ""maxAttempts"": 3, ""backoffMs"": 2000 }
+}","Same as 2.0a with a real SMTP account: credentials encrypted, cache refreshed, used by the next email.",id → PROVIDER_ID (if you use SMTP),201
+API Flow: STEP 2: Add providers and From addresses  ·  Tenant,2.2,List providers,GET,http://localhost:3000/api/v1/providers?channel=CHANNEL_EMAIL,-,channel = CHANNEL_EMAIL,x-api-key: <API_KEY>,(no body),"Tenant's providers from Redis/DB, in failover (priority) order. Credentials never returned, only their names.",,200
+API Flow: STEP 2: Add providers and From addresses  ·  Tenant,2.3,Get provider,GET,http://localhost:3000/api/v1/providers/<PROVIDER_ID>,provider id = <PROVIDER_ID>  (id from Create provider),-,x-api-key: <API_KEY>,(no body),One provider by id.,,200
+API Flow: STEP 2: Add providers and From addresses  ·  Tenant,2.4,Update provider,PATCH,http://localhost:3000/api/v1/providers/<PROVIDER_ID>,provider id = <PROVIDER_ID>  (id from Create provider),-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""priority"": 5,
+  ""active"": true,
+  ""settings"": { ""from"": ""Acme <hello@acme.com>"" },
+  ""fromAddresses"": { ""news"": ""Acme News <news@acme.com>"", ""alerts"": """" },
+  ""credentials"": { ""user"": ""mailer@acme.com"", ""pass"": ""<NEW_PASSWORD>"" },
+  ""limits"": { ""maxConcurrency"": 0, ""maxAttempts"": 5 }
+}",Validated → merged into the stored config → Redis cache refreshed → applies to the next message (no restart).,,200
+API Flow: STEP 2: Add providers and From addresses  ·  Tenant,2.6,List From addresses,GET,http://localhost:3000/api/v1/from-addresses?channel=CHANNEL_EMAIL,-,channel = CHANNEL_EMAIL,x-api-key: <API_KEY>,(no body),"Every From (default + named) of every active email/SMS provider, with the provider that owns it. Pick a name here for ""from"" when sending.",,200
+API Flow: STEP 3: Templates  ·  Tenant,3.1,Create template,POST,http://localhost:3000/api/v1/templates,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_EMAIL"",
+  ""name"": ""invoice-ready"",
+  ""description"": ""Invoice notification"",
+  ""content"": {
+    ""subject"": ""Invoice {{invoiceNo}} from {{appName}}"",
+    ""html"": ""<p>Hi {{name}}, your invoice <b>{{invoiceNo}}</b> of {{amount}} is ready.</p>"",
+    ""body"": ""Hi {{name}}, your invoice {{invoiceNo}} of {{amount}} is ready.""
+  }
+}",Handlebars compiled to check it → template + version 1 saved and activated.,id → TEMPLATE_ID,201
+API Flow: STEP 3: Templates  ·  Tenant,3.2,List templates,GET,http://localhost:3000/api/v1/templates?channel=CHANNEL_EMAIL&page.limit=20,-,"channel = CHANNEL_EMAIL
+page.limit = 20",x-api-key: <API_KEY>,(no body),"The tenant's templates (starters included), paginated.",,200
+API Flow: STEP 3: Templates  ·  Tenant,3.3,Get template,GET,http://localhost:3000/api/v1/templates/<TEMPLATE_ID>,template id = <TEMPLATE_ID>  (id from Create template),-,x-api-key: <API_KEY>,(no body),One template with its active and latest version numbers.,,200
+API Flow: STEP 3: Templates  ·  Tenant,3.4,Publish a new version,POST,http://localhost:3000/api/v1/templates/<TEMPLATE_ID>/versions,template id = <TEMPLATE_ID>  (id from Create template),-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""content"": {
+    ""subject"": ""Your {{appName}} invoice {{invoiceNo}}"",
+    ""html"": ""<p>Hello {{name}}, invoice <b>{{invoiceNo}}</b> ({{amount}}) is ready.</p>""
+  },
+  ""activate"": true
+}",New version compiled and saved; activate=true makes it the one new sends use. Already queued messages keep their version.,,201
+API Flow: STEP 3: Templates  ·  Tenant,3.5,List versions,GET,http://localhost:3000/api/v1/templates/<TEMPLATE_ID>/versions,template id = <TEMPLATE_ID>  (id from Create template),-,x-api-key: <API_KEY>,(no body),"All versions, newest first; active=true marks the live one.",,200
+API Flow: STEP 3: Templates  ·  Tenant,3.6,Activate a version (publish / roll back),POST,http://localhost:3000/api/v1/templates/<TEMPLATE_ID>/versions/1/activate,"template id = <TEMPLATE_ID>  (id from Create template)
+version = 1",-,x-api-key: <API_KEY>,(no body),Switches the active version (roll back or publish a staged one).,,200
+API Flow: STEP 3: Templates  ·  Tenant,3.7,Preview,POST,http://localhost:3000/api/v1/templates/<TEMPLATE_ID>/preview,template id = <TEMPLATE_ID>  (id from Create template),-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""version"": 2,
+  ""data"": { ""name"": ""Jane"", ""invoiceNo"": ""INV-1042"", ""amount"": ""$120"" }
+}",Renders the version with your data. Nothing is stored or sent.,,200
+API Flow: STEP 4: Register devices (push and in-app)  ·  Tenant backend,4.1,Register device,POST,http://localhost:3000/api/v1/devices,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""userId"": ""user-42"",
+  ""token"": ""<FCM registration token>"",
+  ""platform"": ""DEVICE_PLATFORM_ANDROID""
+}",Stores the FCM token for the user (upsert). Push and in-app sends with userId go to all the user's active tokens.,,200
+API Flow: STEP 4: Register devices (push and in-app)  ·  Tenant backend,4.2,List a user's devices,GET,http://localhost:3000/api/v1/devices?user_id=user-42,-,user_id = user-42,x-api-key: <API_KEY>,(no body),The user's registered devices.,,200
+API Flow: STEP 5: Send notifications  ·  Tenant backend,5.1,Send (email with template),POST,http://localhost:3000/api/v1/notifications,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_EMAIL"",
+  ""recipient"": ""jane@example.com"",
+  ""template"": ""invoice-ready"",
+  ""data"": { ""name"": ""Jane"", ""invoiceNo"": ""INV-1042"", ""amount"": ""$120"" },
+  ""from"": ""billing"",
+  ""idempotencyKey"": ""invoice-INV-1042""
+}","Validate → template active version pinned → ""from"" name resolved to the providers that have it → saved (recipient + data encrypted) as QUEUED → job on notifications-email → 202 with queue state. Worker: render → provider (priority order, rate/concurrency check in Redis) → SENT or retry/failover.",notification.id → NOTIFICATION_ID,202
+API Flow: STEP 5: Send notifications  ·  Tenant backend,5.2,Send (email without template),POST,http://localhost:3000/api/v1/notifications,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_EMAIL"",
+  ""recipient"": ""jane@example.com"",
+  ""subject"": ""Your receipt"",
+  ""body"": ""Thanks for your payment, {{name}}."",
+  ""data"": { ""name"": ""Jane"" },
+  ""from"": ""Acme Billing <billing@acme.com>""
+}","Same as 5.1 without a template: subject/body sent as given ({{placeholders}} still filled from data). ""from"" as a full address.",,202
+API Flow: STEP 5: Send notifications  ·  Tenant backend,5.3,"Send (SMS OTP, high priority)",POST,http://localhost:3000/api/v1/notifications,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_SMS"",
+  ""recipient"": ""+919876543210"",
+  ""template"": ""otp"",
+  ""data"": { ""code"": ""482913"", ""expiresInMinutes"": 5 },
+  ""priority"": ""PRIORITY_HIGH"",
+  ""from"": ""india"",
+  ""idempotencyKey"": ""otp-user-42-1730000000""
+}","Same flow on notifications-sms with priority 1 (high) so OTPs go before everything else. ""india"" → only SMS providers with that From name.",,202
+API Flow: STEP 5: Send notifications  ·  Tenant backend,5.4,Send (push to all of a user's devices),POST,http://localhost:3000/api/v1/notifications,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_PUSH"",
+  ""userId"": ""user-42"",
+  ""subject"": ""Order shipped"",
+  ""body"": ""Order {{orderId}} is on its way"",
+  ""data"": { ""orderId"": ""ORD-77"" },
+  ""metadata"": { ""deeplink"": ""app://orders/77"" }
+}",Saved → job on notifications-push → worker loads all active device tokens of userId → FCM (tenant's fcm provider). Dead tokens are deactivated.,,202
+API Flow: STEP 5: Send notifications  ·  Tenant backend,5.5,Send (in-app inbox + push),POST,http://localhost:3000/api/v1/notifications,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_IN_APP"",
+  ""userId"": ""user-42"",
+  ""subject"": ""Invoice ready"",
+  ""body"": ""Invoice {{invoiceNo}} is ready"",
+  ""data"": { ""invoiceNo"": ""INV-1042"" },
+  ""metadata"": { ""deeplink"": ""app://invoices/1042"" },
+  ""alsoPush"": true
+}","Saved → worker writes the message to the user's inbox → FCM signal to the devices (visible push because alsoPush=true, else silent data message type=inbox).",,202
+API Flow: STEP 5: Send notifications  ·  Tenant backend,5.6,Send (scheduled),POST,http://localhost:3000/api/v1/notifications,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_EMAIL"",
+  ""recipient"": ""jane@example.com"",
+  ""template"": ""welcome"",
+  ""data"": { ""name"": ""Jane"" },
+  ""scheduledAt"": ""2026-11-20T09:00:00Z""
+}",Saved as QUEUED → delayed job that runs at scheduledAt. Can be cancelled until then (6.4).,notification.id → SCHEDULED_ID,202
+API Flow: STEP 5: Send notifications  ·  Tenant backend,5.7,"Send bulk (campaigns, up to 500)",POST,http://localhost:3000/api/v1/notifications/bulk,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""notifications"": [
+    { ""channel"": ""CHANNEL_SMS"", ""recipient"": ""+14155550101"", ""body"": ""Sale starts now!"" },
+    { ""channel"": ""CHANNEL_EMAIL"", ""recipient"": ""bob@example.com"", ""subject"": ""Sale"", ""body"": ""Sale starts now!"", ""from"": ""support"" },
+    { ""channel"": ""CHANNEL_PUSH"", ""userId"": ""user-42"", ""subject"": ""Sale"", ""body"": ""Sale starts now!"" }
+  ]
+}",Each item validated and saved → jobs added with low priority (10) so they never delay single sends.,,202
+API Flow: STEP 5: Send notifications  ·  Tenant backend,5.8,Send bulk: same message to many recipients,POST,http://localhost:3000/api/v1/notifications/bulk,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""notifications"": [
+    {
+      ""channel"": ""CHANNEL_EMAIL"",
+      ""recipients"": [""jane@example.com"", ""bob@example.com""],
+      ""template"": ""invoice-ready"",
+      ""data"": { ""name"": ""Jane"", ""invoiceNo"": ""INV-1042"", ""amount"": ""$120"" },
+      ""from"": ""billing"",
+      ""idempotencyKey"": ""invoice-ready-INV-1042""
+    },
+    {
+      ""channel"": ""CHANNEL_SMS"",
+      ""recipient"": ""+919876543210, +919876543211"",
+      ""template"": ""otp"",
+      ""data"": { ""code"": ""482913"", ""expiresInMinutes"": 5 },
+      ""from"": ""india""
+    },
+    {
+      ""channel"": ""CHANNEL_PUSH"",
+      ""userIds"": [""user-42"", ""user-43""],
+      ""subject"": ""Sale"",
+      ""body"": ""Sale starts now!""
+    }
+  ]
+}","One item, many targets. Email / SMS / push tokens: ""recipients"": [...] or a comma-separated ""recipient"". Push / in-app users: ""userIds"": [...]. Each target becomes its own notification (own id, status, retry), in order, duplicates dropped; accepted = number of targets. idempotencyKey gets a per-recipient suffix (""key:<hash>""), so repeating the request replays instead of sending twice. At most 500 notifications after expanding. Several recipients and several userIds in one item is a VALIDATION_ERROR; recipients / userIds on POST /v1/notifications (single send) is a VALIDATION_ERROR.",,202
+"API Flow: STEP 6: Track, retry and cancel  ·  Tenant backend",6.1,Get notification,GET,http://localhost:3000/api/v1/notifications/<NOTIFICATION_ID>,notification id = <NOTIFICATION_ID>  (notification.id from a send),-,x-api-key: <API_KEY>,(no body),"Notification + every provider attempt (which provider, which From, error, duration) + live BullMQ job state.",,200
+"API Flow: STEP 6: Track, retry and cancel  ·  Tenant backend",6.2,List notifications,GET,http://localhost:3000/api/v1/notifications?status=NOTIFICATION_STATUS_FAILED&channel=CHANNEL_EMAIL&page.limit=20,-,"status = NOTIFICATION_STATUS_FAILED
+channel = CHANNEL_EMAIL
+page.limit = 20",x-api-key: <API_KEY>,(no body),"Tenant's notifications, newest first, filtered. recipient filter uses a keyed hash (data is encrypted).",notifications[0].id → FAILED_ID,200
+"API Flow: STEP 6: Track, retry and cancel  ·  Tenant backend",6.3,Retry a failed notification,POST,http://localhost:3000/api/v1/notifications/<FAILED_ID>/retry,notification id = <FAILED_ID>  (id of a FAILED notification (List notifications)),-,x-api-key: <API_KEY>,(no body),"FAILED → QUEUED, new job; renders the same template version again.",,200
+"API Flow: STEP 6: Track, retry and cancel  ·  Tenant backend",6.4,Cancel a queued / scheduled notification,POST,http://localhost:3000/api/v1/notifications/<SCHEDULED_ID>/cancel,notification id = <SCHEDULED_ID>  (notification.id from the scheduled send),-,x-api-key: <API_KEY>,(no body),QUEUED/RETRYING → CANCELLED; the job is removed from the queue.,,200
+"API Flow: STEP 7: In-app inbox  ·  Tenant backend, for the signed-in user",7.1,List inbox messages,GET,http://localhost:3000/api/v1/users/user-42/inbox?unread_only=true&page.limit=20,user_id = user-42  (your user id),"unread_only = true
+page.limit = 20",x-api-key: <API_KEY>,(no body),The user's inbox messages (written by in-app sends) + unread count.,messages[0].id → INBOX_MESSAGE_ID,200
+"API Flow: STEP 7: In-app inbox  ·  Tenant backend, for the signed-in user",7.2,Unread count (badge),GET,http://localhost:3000/api/v1/users/user-42/inbox/unread-count,user_id = user-42  (your user id),-,x-api-key: <API_KEY>,(no body),Unread count only (for the app badge).,,200
+"API Flow: STEP 7: In-app inbox  ·  Tenant backend, for the signed-in user",7.3,Mark messages read,POST,http://localhost:3000/api/v1/users/user-42/inbox/read,user_id = user-42  (your user id),-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""ids"": [""<INBOX_MESSAGE_ID>""]
+}",Marks the given messages read → new unread count.,,200
+"API Flow: STEP 7: In-app inbox  ·  Tenant backend, for the signed-in user",7.4,Mark all read,POST,http://localhost:3000/api/v1/users/user-42/inbox/read-all,user_id = user-42  (your user id),-,x-api-key: <API_KEY>,(no body),Marks all read → 0.,,200
+"API Flow: STEP 7: In-app inbox  ·  Tenant backend, for the signed-in user",7.5,Delete inbox message,DELETE,http://localhost:3000/api/v1/users/user-42/inbox/<INBOX_MESSAGE_ID>,"user_id = user-42  (your user id)
+inbox id = <INBOX_MESSAGE_ID>  (messages[0].id from List inbox messages)",-,x-api-key: <API_KEY>,(no body),Deletes one message → new unread count.,,200
+API Flow: STEP 8: Clean up (destructive: run last)  ·  Admin / Tenant,8.1,Revoke API key,DELETE,http://localhost:3000/api/v1/admin/tenants/<TENANT_ID>/api-keys/<KEY_ID>,"tenant id = <TENANT_ID>  (tenant.id from Create tenant)
+api-key id = <KEY_ID>  (apiKey.id from Create API key)",-,x-admin-key: <ADMIN_KEY>,(no body),Key revoked immediately; calls with it get 401.,,204
+API Flow: STEP 8: Clean up (destructive: run last)  ·  Admin / Tenant,8.2,Delete provider,DELETE,http://localhost:3000/api/v1/providers/<PROVIDER_ID>,provider id = <PROVIDER_ID>  (id from Create provider),-,x-api-key: <API_KEY>,(no body),Provider deleted → Redis cache refreshed → the next message uses the remaining providers (or the platform default).,,204
+API Flow: STEP 8: Clean up (destructive: run last)  ·  Admin / Tenant,8.3,Archive,POST,http://localhost:3000/api/v1/templates/<TEMPLATE_ID>/archive,template id = <TEMPLATE_ID>  (id from Create template),-,x-api-key: <API_KEY>,(no body),Template archived: new sends with it get 409; queued ones still go out.,,200
+API Flow: STEP 8: Clean up (destructive: run last)  ·  Admin / Tenant,8.4,Unregister device,DELETE,http://localhost:3000/api/v1/devices/<FCM_TOKEN>,token = <FCM_TOKEN>  (the device token from your app),-,x-api-key: <API_KEY>,(no body),Device token removed; the user stops getting push on it.,,204
+"Flow by Provider: EMAIL · SMTP (Gmail, Outlook, any SMTP server)",1,Check the service is ready,GET,http://localhost:9464/health/ready,-,-,(none),(no body),"Expect {""ready"":true}. If 503, start Postgres/Redis.",,
+"Flow by Provider: EMAIL · SMTP (Gmail, Outlook, any SMTP server)",2,Create a tenant for this flow,POST,http://localhost:3000/api/v1/admin/tenants,-,-,"Content-Type: application/json
+x-admin-key: <ADMIN_KEY>","{
+  ""name"": ""Acme Inc."",
+  ""slug"": ""acme-smtp-demo"",
+  ""settings"": { ""appName"": ""Acme"" }
+}",Admin creates a tenant just for this flow (so only this provider is configured); starter templates otp + welcome are added; the API key is returned once. Already ran this flow? Change the slug (409 TENANT_SLUG_TAKEN).,"tenant.id → TENANT_ID
+apiKey.key → API_KEY",
+"Flow by Provider: EMAIL · SMTP (Gmail, Outlook, any SMTP server)",3,Add the email provider,POST,http://localhost:3000/api/v1/providers,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_EMAIL"",
+  ""provider"": ""smtp"",
+  ""name"": ""gmail-smtp"",
+  ""priority"": 1,
+  ""settings"": {
+    ""host"": ""smtp.gmail.com"",
+    ""port"": ""587"",
+    ""secure"": ""false"",
+    ""from"": ""Acme <your.account@gmail.com>""
+  },
+  ""credentials"": { ""user"": ""your.account@gmail.com"", ""pass"": ""<GMAIL_APP_PASSWORD>"" },
+  ""fromAddresses"": { ""smtp-demo"": ""Acme Orders <your.account@gmail.com>"" },
+  ""limits"": { ""rateMax"": 20, ""rateDurationMs"": 1000, ""maxConcurrency"": 5, ""maxAttempts"": 3, ""backoffMs"": 2000 }
+}",Validated → saved (credentials encrypted) → Redis cache refreshed. Gmail needs an App Password (Google account → Security → App passwords). Gmail only sends as your account or its verified aliases.,id → PROVIDER_ID,
+"Flow by Provider: EMAIL · SMTP (Gmail, Outlook, any SMTP server)",4,Check the From addresses,GET,http://localhost:3000/api/v1/from-addresses?channel=CHANNEL_EMAIL,-,channel = CHANNEL_EMAIL,x-api-key: <API_KEY>,(no body),"Lists every From with its provider. ""smtp-demo"" must be in the list: sending with it routes only to this provider.",,
+"Flow by Provider: EMAIL · SMTP (Gmail, Outlook, any SMTP server)",5,Create the email template,POST,http://localhost:3000/api/v1/templates,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_EMAIL"",
+  ""name"": ""order-shipped"",
+  ""description"": ""Order shipped email"",
+  ""content"": {
+    ""subject"": ""Order {{orderId}} has shipped"",
+    ""html"": ""<p>Hi {{name}}, your order <b>{{orderId}}</b> is on its way. Track it: {{trackingUrl}}</p>"",
+    ""body"": ""Hi {{name}}, your order {{orderId}} is on its way. Track it: {{trackingUrl}}""
+  }
+}",Saved as version 1 and active.,id → TEMPLATE_ID,
+"Flow by Provider: EMAIL · SMTP (Gmail, Outlook, any SMTP server)",6,Preview the template,POST,http://localhost:3000/api/v1/templates/<TEMPLATE_ID>/preview,template id = <TEMPLATE_ID>  (id from Create template),-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""data"": { ""name"": ""Jane"", ""orderId"": ""ORD-1001"", ""trackingUrl"": ""https://acme.com/t/ORD-1001"" }
+}",Shows the rendered subject and html. Nothing is sent.,,
+"Flow by Provider: EMAIL · SMTP (Gmail, Outlook, any SMTP server)",7,Send email with the template,POST,http://localhost:3000/api/v1/notifications,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_EMAIL"",
+  ""recipient"": ""jane@example.com"",
+  ""template"": ""order-shipped"",
+  ""data"": {
+    ""name"": ""Jane"",
+    ""orderId"": ""ORD-1001"",
+    ""trackingUrl"": ""https://acme.com/t/ORD-1001""
+  },
+  ""from"": ""smtp-demo"",
+  ""idempotencyKey"": ""order-shipped-ORD-1001-smtp-demo""
+}","202 + queue state. Worker renders the template and sends through this provider as its ""smtp-demo"" address.",notification.id → NOTIFICATION_ID,
+"Flow by Provider: EMAIL · SMTP (Gmail, Outlook, any SMTP server)",8,Check delivery,GET,http://localhost:3000/api/v1/notifications/<NOTIFICATION_ID>,notification id = <NOTIFICATION_ID>  (notification.id from a send),-,x-api-key: <API_KEY>,(no body),status NOTIFICATION_STATUS_SENT; providerName = this provider; sentFrom = the address used; attempts list each provider call.,,
+"Flow by Provider: EMAIL · SMTP (Gmail, Outlook, any SMTP server)",9,Send email without a template,POST,http://localhost:3000/api/v1/notifications,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_EMAIL"",
+  ""recipient"": ""jane@example.com"",
+  ""subject"": ""Your receipt from {{appName}}"",
+  ""body"": ""Hi {{name}}, thanks for your payment of {{amount}}."",
+  ""data"": {
+    ""name"": ""Jane"",
+    ""amount"": ""$49.00""
+  },
+  ""from"": ""smtp-demo""
+}",Same flow; subject/body given directly ({{placeholders}} filled from data).,notification.id → NOTIFICATION_ID,
+"Flow by Provider: EMAIL · SMTP (Gmail, Outlook, any SMTP server)",10,Check delivery,GET,http://localhost:3000/api/v1/notifications/<NOTIFICATION_ID>,notification id = <NOTIFICATION_ID>  (notification.id from a send),-,x-api-key: <API_KEY>,(no body),As step 8.,,
+Flow by Provider: EMAIL · Amazon SES,1,Check the service is ready,GET,http://localhost:9464/health/ready,-,-,(none),(no body),"Expect {""ready"":true}. If 503, start Postgres/Redis.",,
+Flow by Provider: EMAIL · Amazon SES,2,Create a tenant for this flow,POST,http://localhost:3000/api/v1/admin/tenants,-,-,"Content-Type: application/json
+x-admin-key: <ADMIN_KEY>","{
+  ""name"": ""Acme Inc."",
+  ""slug"": ""acme-ses-demo"",
+  ""settings"": { ""appName"": ""Acme"" }
+}",Admin creates a tenant just for this flow (so only this provider is configured); starter templates otp + welcome are added; the API key is returned once. Already ran this flow? Change the slug (409 TENANT_SLUG_TAKEN).,"tenant.id → TENANT_ID
+apiKey.key → API_KEY",
+Flow by Provider: EMAIL · Amazon SES,3,Add the email provider,POST,http://localhost:3000/api/v1/providers,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_EMAIL"",
+  ""provider"": ""ses"",
+  ""name"": ""ses-main"",
+  ""priority"": 2,
+  ""settings"": { ""region"": ""eu-west-1"", ""from"": ""Acme <no-reply@mail.acme.com>"" },
+  ""credentials"": { ""access_key_id"": ""AKIAXXXXXXXXXXXXXXXX"", ""secret_access_key"": ""<AWS_SECRET>"" },
+  ""fromAddresses"": { ""ses-demo"": ""Acme Orders <orders@mail.acme.com>"" }
+}",Validated → saved (credentials encrypted) → Redis cache refreshed. Every From must be a verified SES identity. Omit credentials to use the server's IAM role.,id → PROVIDER_ID,
+Flow by Provider: EMAIL · Amazon SES,4,Check the From addresses,GET,http://localhost:3000/api/v1/from-addresses?channel=CHANNEL_EMAIL,-,channel = CHANNEL_EMAIL,x-api-key: <API_KEY>,(no body),"Lists every From with its provider. ""ses-demo"" must be in the list: sending with it routes only to this provider.",,
+Flow by Provider: EMAIL · Amazon SES,5,Create the email template,POST,http://localhost:3000/api/v1/templates,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_EMAIL"",
+  ""name"": ""order-shipped"",
+  ""description"": ""Order shipped email"",
+  ""content"": {
+    ""subject"": ""Order {{orderId}} has shipped"",
+    ""html"": ""<p>Hi {{name}}, your order <b>{{orderId}}</b> is on its way. Track it: {{trackingUrl}}</p>"",
+    ""body"": ""Hi {{name}}, your order {{orderId}} is on its way. Track it: {{trackingUrl}}""
+  }
+}",Saved as version 1 and active.,id → TEMPLATE_ID,
+Flow by Provider: EMAIL · Amazon SES,6,Preview the template,POST,http://localhost:3000/api/v1/templates/<TEMPLATE_ID>/preview,template id = <TEMPLATE_ID>  (id from Create template),-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""data"": { ""name"": ""Jane"", ""orderId"": ""ORD-1001"", ""trackingUrl"": ""https://acme.com/t/ORD-1001"" }
+}",Shows the rendered subject and html. Nothing is sent.,,
+Flow by Provider: EMAIL · Amazon SES,7,Send email with the template,POST,http://localhost:3000/api/v1/notifications,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_EMAIL"",
+  ""recipient"": ""jane@example.com"",
+  ""template"": ""order-shipped"",
+  ""data"": {
+    ""name"": ""Jane"",
+    ""orderId"": ""ORD-1001"",
+    ""trackingUrl"": ""https://acme.com/t/ORD-1001""
+  },
+  ""from"": ""ses-demo"",
+  ""idempotencyKey"": ""order-shipped-ORD-1001-ses-demo""
+}","202 + queue state. Worker renders the template and sends through this provider as its ""ses-demo"" address.",notification.id → NOTIFICATION_ID,
+Flow by Provider: EMAIL · Amazon SES,8,Check delivery,GET,http://localhost:3000/api/v1/notifications/<NOTIFICATION_ID>,notification id = <NOTIFICATION_ID>  (notification.id from a send),-,x-api-key: <API_KEY>,(no body),status NOTIFICATION_STATUS_SENT; providerName = this provider; sentFrom = the address used; attempts list each provider call.,,
+Flow by Provider: EMAIL · Amazon SES,9,Send email without a template,POST,http://localhost:3000/api/v1/notifications,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_EMAIL"",
+  ""recipient"": ""jane@example.com"",
+  ""subject"": ""Your receipt from {{appName}}"",
+  ""body"": ""Hi {{name}}, thanks for your payment of {{amount}}."",
+  ""data"": {
+    ""name"": ""Jane"",
+    ""amount"": ""$49.00""
+  },
+  ""from"": ""ses-demo""
+}",Same flow; subject/body given directly ({{placeholders}} filled from data).,notification.id → NOTIFICATION_ID,
+Flow by Provider: EMAIL · Amazon SES,10,Check delivery,GET,http://localhost:3000/api/v1/notifications/<NOTIFICATION_ID>,notification id = <NOTIFICATION_ID>  (notification.id from a send),-,x-api-key: <API_KEY>,(no body),As step 8.,,
+Flow by Provider: EMAIL · SendGrid,1,Check the service is ready,GET,http://localhost:9464/health/ready,-,-,(none),(no body),"Expect {""ready"":true}. If 503, start Postgres/Redis.",,
+Flow by Provider: EMAIL · SendGrid,2,Create a tenant for this flow,POST,http://localhost:3000/api/v1/admin/tenants,-,-,"Content-Type: application/json
+x-admin-key: <ADMIN_KEY>","{
+  ""name"": ""Acme Inc."",
+  ""slug"": ""acme-sendgrid-demo"",
+  ""settings"": { ""appName"": ""Acme"" }
+}",Admin creates a tenant just for this flow (so only this provider is configured); starter templates otp + welcome are added; the API key is returned once. Already ran this flow? Change the slug (409 TENANT_SLUG_TAKEN).,"tenant.id → TENANT_ID
+apiKey.key → API_KEY",
+Flow by Provider: EMAIL · SendGrid,3,Add the email provider,POST,http://localhost:3000/api/v1/providers,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_EMAIL"",
+  ""provider"": ""sendgrid"",
+  ""name"": ""sendgrid-main"",
+  ""priority"": 3,
+  ""settings"": { ""from"": ""Acme <no-reply@acme.com>"" },
+  ""credentials"": { ""api_key"": ""SG.XXXXXXXXXXXXXXXX"" },
+  ""fromAddresses"": { ""sendgrid-demo"": ""Acme Orders <orders@acme.com>"" }
+}",Validated → saved (credentials encrypted) → Redis cache refreshed. Every From must be a verified SendGrid sender or domain.,id → PROVIDER_ID,
+Flow by Provider: EMAIL · SendGrid,4,Check the From addresses,GET,http://localhost:3000/api/v1/from-addresses?channel=CHANNEL_EMAIL,-,channel = CHANNEL_EMAIL,x-api-key: <API_KEY>,(no body),"Lists every From with its provider. ""sendgrid-demo"" must be in the list: sending with it routes only to this provider.",,
+Flow by Provider: EMAIL · SendGrid,5,Create the email template,POST,http://localhost:3000/api/v1/templates,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_EMAIL"",
+  ""name"": ""order-shipped"",
+  ""description"": ""Order shipped email"",
+  ""content"": {
+    ""subject"": ""Order {{orderId}} has shipped"",
+    ""html"": ""<p>Hi {{name}}, your order <b>{{orderId}}</b> is on its way. Track it: {{trackingUrl}}</p>"",
+    ""body"": ""Hi {{name}}, your order {{orderId}} is on its way. Track it: {{trackingUrl}}""
+  }
+}",Saved as version 1 and active.,id → TEMPLATE_ID,
+Flow by Provider: EMAIL · SendGrid,6,Preview the template,POST,http://localhost:3000/api/v1/templates/<TEMPLATE_ID>/preview,template id = <TEMPLATE_ID>  (id from Create template),-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""data"": { ""name"": ""Jane"", ""orderId"": ""ORD-1001"", ""trackingUrl"": ""https://acme.com/t/ORD-1001"" }
+}",Shows the rendered subject and html. Nothing is sent.,,
+Flow by Provider: EMAIL · SendGrid,7,Send email with the template,POST,http://localhost:3000/api/v1/notifications,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_EMAIL"",
+  ""recipient"": ""jane@example.com"",
+  ""template"": ""order-shipped"",
+  ""data"": {
+    ""name"": ""Jane"",
+    ""orderId"": ""ORD-1001"",
+    ""trackingUrl"": ""https://acme.com/t/ORD-1001""
+  },
+  ""from"": ""sendgrid-demo"",
+  ""idempotencyKey"": ""order-shipped-ORD-1001-sendgrid-demo""
+}","202 + queue state. Worker renders the template and sends through this provider as its ""sendgrid-demo"" address.",notification.id → NOTIFICATION_ID,
+Flow by Provider: EMAIL · SendGrid,8,Check delivery,GET,http://localhost:3000/api/v1/notifications/<NOTIFICATION_ID>,notification id = <NOTIFICATION_ID>  (notification.id from a send),-,x-api-key: <API_KEY>,(no body),status NOTIFICATION_STATUS_SENT; providerName = this provider; sentFrom = the address used; attempts list each provider call.,,
+Flow by Provider: EMAIL · SendGrid,9,Send email without a template,POST,http://localhost:3000/api/v1/notifications,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_EMAIL"",
+  ""recipient"": ""jane@example.com"",
+  ""subject"": ""Your receipt from {{appName}}"",
+  ""body"": ""Hi {{name}}, thanks for your payment of {{amount}}."",
+  ""data"": {
+    ""name"": ""Jane"",
+    ""amount"": ""$49.00""
+  },
+  ""from"": ""sendgrid-demo""
+}",Same flow; subject/body given directly ({{placeholders}} filled from data).,notification.id → NOTIFICATION_ID,
+Flow by Provider: EMAIL · SendGrid,10,Check delivery,GET,http://localhost:3000/api/v1/notifications/<NOTIFICATION_ID>,notification id = <NOTIFICATION_ID>  (notification.id from a send),-,x-api-key: <API_KEY>,(no body),As step 8.,,
+"Flow by Provider: EMAIL · Console (demo, nothing is sent: logged in the server output)",1,Check the service is ready,GET,http://localhost:9464/health/ready,-,-,(none),(no body),"Expect {""ready"":true}. If 503, start Postgres/Redis.",,
+"Flow by Provider: EMAIL · Console (demo, nothing is sent: logged in the server output)",2,Create a tenant for this flow,POST,http://localhost:3000/api/v1/admin/tenants,-,-,"Content-Type: application/json
+x-admin-key: <ADMIN_KEY>","{
+  ""name"": ""Acme Inc."",
+  ""slug"": ""acme-console-demo"",
+  ""settings"": { ""appName"": ""Acme"" }
+}",Admin creates a tenant just for this flow (so only this provider is configured); starter templates otp + welcome are added; the API key is returned once. Already ran this flow? Change the slug (409 TENANT_SLUG_TAKEN).,"tenant.id → TENANT_ID
+apiKey.key → API_KEY",
+"Flow by Provider: EMAIL · Console (demo, nothing is sent: logged in the server output)",3,Add the email provider,POST,http://localhost:3000/api/v1/providers,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_EMAIL"",
+  ""provider"": ""console"",
+  ""name"": ""console-email"",
+  ""priority"": 4,
+  ""settings"": { ""from"": ""Acme <no-reply@acme.com>"" },
+  ""fromAddresses"": { ""console-demo"": ""Acme Orders <orders@acme.com>"" }
+}",Validated → saved (credentials encrypted) → Redis cache refreshed. Safe to demo: the message is printed in the server log.,id → PROVIDER_ID,
+"Flow by Provider: EMAIL · Console (demo, nothing is sent: logged in the server output)",4,Check the From addresses,GET,http://localhost:3000/api/v1/from-addresses?channel=CHANNEL_EMAIL,-,channel = CHANNEL_EMAIL,x-api-key: <API_KEY>,(no body),"Lists every From with its provider. ""console-demo"" must be in the list: sending with it routes only to this provider.",,
+"Flow by Provider: EMAIL · Console (demo, nothing is sent: logged in the server output)",5,Create the email template,POST,http://localhost:3000/api/v1/templates,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_EMAIL"",
+  ""name"": ""order-shipped"",
+  ""description"": ""Order shipped email"",
+  ""content"": {
+    ""subject"": ""Order {{orderId}} has shipped"",
+    ""html"": ""<p>Hi {{name}}, your order <b>{{orderId}}</b> is on its way. Track it: {{trackingUrl}}</p>"",
+    ""body"": ""Hi {{name}}, your order {{orderId}} is on its way. Track it: {{trackingUrl}}""
+  }
+}",Saved as version 1 and active.,id → TEMPLATE_ID,
+"Flow by Provider: EMAIL · Console (demo, nothing is sent: logged in the server output)",6,Preview the template,POST,http://localhost:3000/api/v1/templates/<TEMPLATE_ID>/preview,template id = <TEMPLATE_ID>  (id from Create template),-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""data"": { ""name"": ""Jane"", ""orderId"": ""ORD-1001"", ""trackingUrl"": ""https://acme.com/t/ORD-1001"" }
+}",Shows the rendered subject and html. Nothing is sent.,,
+"Flow by Provider: EMAIL · Console (demo, nothing is sent: logged in the server output)",7,Send email with the template,POST,http://localhost:3000/api/v1/notifications,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_EMAIL"",
+  ""recipient"": ""jane@example.com"",
+  ""template"": ""order-shipped"",
+  ""data"": {
+    ""name"": ""Jane"",
+    ""orderId"": ""ORD-1001"",
+    ""trackingUrl"": ""https://acme.com/t/ORD-1001""
+  },
+  ""from"": ""console-demo"",
+  ""idempotencyKey"": ""order-shipped-ORD-1001-console-demo""
+}","202 + queue state. Worker renders the template and sends through this provider as its ""console-demo"" address.",notification.id → NOTIFICATION_ID,
+"Flow by Provider: EMAIL · Console (demo, nothing is sent: logged in the server output)",8,Check delivery,GET,http://localhost:3000/api/v1/notifications/<NOTIFICATION_ID>,notification id = <NOTIFICATION_ID>  (notification.id from a send),-,x-api-key: <API_KEY>,(no body),status NOTIFICATION_STATUS_SENT; providerName = this provider; sentFrom = the address used; attempts list each provider call.,,
+"Flow by Provider: EMAIL · Console (demo, nothing is sent: logged in the server output)",9,Send email without a template,POST,http://localhost:3000/api/v1/notifications,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_EMAIL"",
+  ""recipient"": ""jane@example.com"",
+  ""subject"": ""Your receipt from {{appName}}"",
+  ""body"": ""Hi {{name}}, thanks for your payment of {{amount}}."",
+  ""data"": {
+    ""name"": ""Jane"",
+    ""amount"": ""$49.00""
+  },
+  ""from"": ""console-demo""
+}",Same flow; subject/body given directly ({{placeholders}} filled from data).,notification.id → NOTIFICATION_ID,
+"Flow by Provider: EMAIL · Console (demo, nothing is sent: logged in the server output)",10,Check delivery,GET,http://localhost:3000/api/v1/notifications/<NOTIFICATION_ID>,notification id = <NOTIFICATION_ID>  (notification.id from a send),-,x-api-key: <API_KEY>,(no body),As step 8.,,
+Flow by Provider: SMS · Twilio,1,Check the service is ready,GET,http://localhost:9464/health/ready,-,-,(none),(no body),"Expect {""ready"":true}. If 503, start Postgres/Redis.",,
+Flow by Provider: SMS · Twilio,2,Create a tenant for this flow,POST,http://localhost:3000/api/v1/admin/tenants,-,-,"Content-Type: application/json
+x-admin-key: <ADMIN_KEY>","{
+  ""name"": ""Acme Inc."",
+  ""slug"": ""acme-twilio-demo"",
+  ""settings"": { ""appName"": ""Acme"" }
+}",Admin creates a tenant just for this flow (so only this provider is configured); starter templates otp + welcome are added; the API key is returned once. Already ran this flow? Change the slug (409 TENANT_SLUG_TAKEN).,"tenant.id → TENANT_ID
+apiKey.key → API_KEY",
+Flow by Provider: SMS · Twilio,3,Add the SMS provider,POST,http://localhost:3000/api/v1/providers,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_SMS"",
+  ""provider"": ""twilio"",
+  ""name"": ""twilio-main"",
+  ""priority"": 1,
+  ""settings"": { ""from"": ""+14155550100"" },
+  ""credentials"": { ""account_sid"": ""ACXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"", ""auth_token"": ""<TWILIO_AUTH_TOKEN>"" },
+  ""fromAddresses"": { ""twilio-demo"": ""+14155550100"" },
+  ""limits"": { ""rateMax"": 10, ""rateDurationMs"": 1000 }
+}","Validated → saved (credentials encrypted) → Redis cache refreshed. from = a Twilio number you own, or set settings.messaging_service_sid instead.",id → PROVIDER_ID,
+Flow by Provider: SMS · Twilio,4,Check the From (sender) list,GET,http://localhost:3000/api/v1/from-addresses?channel=CHANNEL_SMS,-,channel = CHANNEL_SMS,x-api-key: <API_KEY>,(no body),"""twilio-demo"" must be listed with this provider.",,
+Flow by Provider: SMS · Twilio,5,"Send OTP with the starter ""otp"" template",POST,http://localhost:3000/api/v1/notifications,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_SMS"",
+  ""recipient"": ""+919876543210"",
+  ""template"": ""otp"",
+  ""data"": {
+    ""code"": ""482913"",
+    ""expiresInMinutes"": 5
+  },
+  ""priority"": ""PRIORITY_HIGH"",
+  ""from"": ""twilio-demo"",
+  ""idempotencyKey"": ""otp-user-42-twilio-demo-1""
+}",High priority (queue priority 1): goes before normal and bulk messages. Recipient must be E.164 (+ and country code).,notification.id → NOTIFICATION_ID,
+Flow by Provider: SMS · Twilio,6,Check delivery,GET,http://localhost:3000/api/v1/notifications/<NOTIFICATION_ID>,notification id = <NOTIFICATION_ID>  (notification.id from a send),-,x-api-key: <API_KEY>,(no body),status SENT; providerName = this provider; sentFrom = the sender id / number used.,,
+Flow by Provider: SMS · Twilio,7,Create your own SMS template,POST,http://localhost:3000/api/v1/templates,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_SMS"",
+  ""name"": ""order-shipped"",
+  ""content"": { ""body"": ""{{appName}}: order {{orderId}} has shipped. Track: {{trackingUrl}}"" }
+}","Version 1, active.",,
+Flow by Provider: SMS · Twilio,8,Send with your template,POST,http://localhost:3000/api/v1/notifications,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_SMS"",
+  ""recipient"": ""+919876543210"",
+  ""template"": ""order-shipped"",
+  ""data"": {
+    ""orderId"": ""ORD-1001"",
+    ""trackingUrl"": ""https://acme.com/t/ORD-1001""
+  },
+  ""from"": ""twilio-demo""
+}",Normal priority.,notification.id → NOTIFICATION_ID,
+Flow by Provider: SMS · Twilio,9,Check delivery,GET,http://localhost:3000/api/v1/notifications/<NOTIFICATION_ID>,notification id = <NOTIFICATION_ID>  (notification.id from a send),-,x-api-key: <API_KEY>,(no body),As step 6.,,
+Flow by Provider: SMS · Amazon SNS,1,Check the service is ready,GET,http://localhost:9464/health/ready,-,-,(none),(no body),"Expect {""ready"":true}. If 503, start Postgres/Redis.",,
+Flow by Provider: SMS · Amazon SNS,2,Create a tenant for this flow,POST,http://localhost:3000/api/v1/admin/tenants,-,-,"Content-Type: application/json
+x-admin-key: <ADMIN_KEY>","{
+  ""name"": ""Acme Inc."",
+  ""slug"": ""acme-sns-demo"",
+  ""settings"": { ""appName"": ""Acme"" }
+}",Admin creates a tenant just for this flow (so only this provider is configured); starter templates otp + welcome are added; the API key is returned once. Already ran this flow? Change the slug (409 TENANT_SLUG_TAKEN).,"tenant.id → TENANT_ID
+apiKey.key → API_KEY",
+Flow by Provider: SMS · Amazon SNS,3,Add the SMS provider,POST,http://localhost:3000/api/v1/providers,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_SMS"",
+  ""provider"": ""sns"",
+  ""name"": ""sns-main"",
+  ""priority"": 2,
+  ""settings"": { ""region"": ""ap-south-1"", ""from"": ""ACMEIN"" },
+  ""credentials"": { ""access_key_id"": ""AKIAXXXXXXXXXXXXXXXX"", ""secret_access_key"": ""<AWS_SECRET>"" },
+  ""fromAddresses"": { ""sns-demo"": ""ACMEIN"" }
+}",Validated → saved (credentials encrypted) → Redis cache refreshed. from = sender id (India needs DLT registration). Omit credentials to use the IAM role.,id → PROVIDER_ID,
+Flow by Provider: SMS · Amazon SNS,4,Check the From (sender) list,GET,http://localhost:3000/api/v1/from-addresses?channel=CHANNEL_SMS,-,channel = CHANNEL_SMS,x-api-key: <API_KEY>,(no body),"""sns-demo"" must be listed with this provider.",,
+Flow by Provider: SMS · Amazon SNS,5,"Send OTP with the starter ""otp"" template",POST,http://localhost:3000/api/v1/notifications,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_SMS"",
+  ""recipient"": ""+919876543210"",
+  ""template"": ""otp"",
+  ""data"": {
+    ""code"": ""482913"",
+    ""expiresInMinutes"": 5
+  },
+  ""priority"": ""PRIORITY_HIGH"",
+  ""from"": ""sns-demo"",
+  ""idempotencyKey"": ""otp-user-42-sns-demo-1""
+}",High priority (queue priority 1): goes before normal and bulk messages. Recipient must be E.164 (+ and country code).,notification.id → NOTIFICATION_ID,
+Flow by Provider: SMS · Amazon SNS,6,Check delivery,GET,http://localhost:3000/api/v1/notifications/<NOTIFICATION_ID>,notification id = <NOTIFICATION_ID>  (notification.id from a send),-,x-api-key: <API_KEY>,(no body),status SENT; providerName = this provider; sentFrom = the sender id / number used.,,
+Flow by Provider: SMS · Amazon SNS,7,Create your own SMS template,POST,http://localhost:3000/api/v1/templates,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_SMS"",
+  ""name"": ""order-shipped"",
+  ""content"": { ""body"": ""{{appName}}: order {{orderId}} has shipped. Track: {{trackingUrl}}"" }
+}","Version 1, active.",,
+Flow by Provider: SMS · Amazon SNS,8,Send with your template,POST,http://localhost:3000/api/v1/notifications,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_SMS"",
+  ""recipient"": ""+919876543210"",
+  ""template"": ""order-shipped"",
+  ""data"": {
+    ""orderId"": ""ORD-1001"",
+    ""trackingUrl"": ""https://acme.com/t/ORD-1001""
+  },
+  ""from"": ""sns-demo""
+}",Normal priority.,notification.id → NOTIFICATION_ID,
+Flow by Provider: SMS · Amazon SNS,9,Check delivery,GET,http://localhost:3000/api/v1/notifications/<NOTIFICATION_ID>,notification id = <NOTIFICATION_ID>  (notification.id from a send),-,x-api-key: <API_KEY>,(no body),As step 6.,,
+"Flow by Provider: SMS · Console (demo, nothing is sent)",1,Check the service is ready,GET,http://localhost:9464/health/ready,-,-,(none),(no body),"Expect {""ready"":true}. If 503, start Postgres/Redis.",,
+"Flow by Provider: SMS · Console (demo, nothing is sent)",2,Create a tenant for this flow,POST,http://localhost:3000/api/v1/admin/tenants,-,-,"Content-Type: application/json
+x-admin-key: <ADMIN_KEY>","{
+  ""name"": ""Acme Inc."",
+  ""slug"": ""acme-console-sms-demo"",
+  ""settings"": { ""appName"": ""Acme"" }
+}",Admin creates a tenant just for this flow (so only this provider is configured); starter templates otp + welcome are added; the API key is returned once. Already ran this flow? Change the slug (409 TENANT_SLUG_TAKEN).,"tenant.id → TENANT_ID
+apiKey.key → API_KEY",
+"Flow by Provider: SMS · Console (demo, nothing is sent)",3,Add the SMS provider,POST,http://localhost:3000/api/v1/providers,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_SMS"",
+  ""provider"": ""console"",
+  ""name"": ""console-sms"",
+  ""priority"": 3,
+  ""settings"": { ""from"": ""+14155550199"" },
+  ""fromAddresses"": { ""console-sms-demo"": ""+14155550199"" }
+}",Validated → saved (credentials encrypted) → Redis cache refreshed. Safe to demo: the SMS is printed in the server log.,id → PROVIDER_ID,
+"Flow by Provider: SMS · Console (demo, nothing is sent)",4,Check the From (sender) list,GET,http://localhost:3000/api/v1/from-addresses?channel=CHANNEL_SMS,-,channel = CHANNEL_SMS,x-api-key: <API_KEY>,(no body),"""console-sms-demo"" must be listed with this provider.",,
+"Flow by Provider: SMS · Console (demo, nothing is sent)",5,"Send OTP with the starter ""otp"" template",POST,http://localhost:3000/api/v1/notifications,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_SMS"",
+  ""recipient"": ""+919876543210"",
+  ""template"": ""otp"",
+  ""data"": {
+    ""code"": ""482913"",
+    ""expiresInMinutes"": 5
+  },
+  ""priority"": ""PRIORITY_HIGH"",
+  ""from"": ""console-sms-demo"",
+  ""idempotencyKey"": ""otp-user-42-console-sms-demo-1""
+}",High priority (queue priority 1): goes before normal and bulk messages. Recipient must be E.164 (+ and country code).,notification.id → NOTIFICATION_ID,
+"Flow by Provider: SMS · Console (demo, nothing is sent)",6,Check delivery,GET,http://localhost:3000/api/v1/notifications/<NOTIFICATION_ID>,notification id = <NOTIFICATION_ID>  (notification.id from a send),-,x-api-key: <API_KEY>,(no body),status SENT; providerName = this provider; sentFrom = the sender id / number used.,,
+"Flow by Provider: SMS · Console (demo, nothing is sent)",7,Create your own SMS template,POST,http://localhost:3000/api/v1/templates,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_SMS"",
+  ""name"": ""order-shipped"",
+  ""content"": { ""body"": ""{{appName}}: order {{orderId}} has shipped. Track: {{trackingUrl}}"" }
+}","Version 1, active.",,
+"Flow by Provider: SMS · Console (demo, nothing is sent)",8,Send with your template,POST,http://localhost:3000/api/v1/notifications,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_SMS"",
+  ""recipient"": ""+919876543210"",
+  ""template"": ""order-shipped"",
+  ""data"": {
+    ""orderId"": ""ORD-1001"",
+    ""trackingUrl"": ""https://acme.com/t/ORD-1001""
+  },
+  ""from"": ""console-sms-demo""
+}",Normal priority.,notification.id → NOTIFICATION_ID,
+"Flow by Provider: SMS · Console (demo, nothing is sent)",9,Check delivery,GET,http://localhost:3000/api/v1/notifications/<NOTIFICATION_ID>,notification id = <NOTIFICATION_ID>  (notification.id from a send),-,x-api-key: <API_KEY>,(no body),As step 6.,,
+Flow by Provider: PUSH · Firebase Cloud Messaging (fcm),1,Check the service is ready,GET,http://localhost:9464/health/ready,-,-,(none),(no body),"Expect {""ready"":true}. If 503, start Postgres/Redis.",,
+Flow by Provider: PUSH · Firebase Cloud Messaging (fcm),2,Create a tenant for this flow,POST,http://localhost:3000/api/v1/admin/tenants,-,-,"Content-Type: application/json
+x-admin-key: <ADMIN_KEY>","{
+  ""name"": ""Acme Inc."",
+  ""slug"": ""acme-push-demo"",
+  ""settings"": { ""appName"": ""Acme"" }
+}",Admin creates a tenant just for this flow (so only this provider is configured); starter templates otp + welcome are added; the API key is returned once. Already ran this flow? Change the slug (409 TENANT_SLUG_TAKEN).,"tenant.id → TENANT_ID
+apiKey.key → API_KEY",
+Flow by Provider: PUSH · Firebase Cloud Messaging (fcm),3,Add the Firebase provider,POST,http://localhost:3000/api/v1/providers,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_PUSH"",
+  ""provider"": ""fcm"",
+  ""name"": ""firebase"",
+  ""priority"": 1,
+  ""credentials"": {
+    ""service_account"": ""{\""type\"":\""service_account\"",\""project_id\"":\""acme-app\"",\""private_key_id\"":\""<PRIVATE_KEY_ID>\"",\""private_key\"":\""-----BEGIN PRIVATE KEY-----\\n<KEY>\\n-----END PRIVATE KEY-----\\n\"",\""client_email\"":\""firebase-adminsdk@acme-app.iam.gserviceaccount.com\""}""
+  }
+}","Paste the whole Firebase service account JSON (Firebase console → Project settings → Service accounts → Generate key) as ONE string. Encrypted, cached in Redis, used by push and in-app.",id → PROVIDER_ID,
+Flow by Provider: PUSH · Firebase Cloud Messaging (fcm),4,Register the user's device,POST,http://localhost:3000/api/v1/devices,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""userId"": ""user-42"",
+  ""token"": ""<FCM_TOKEN>"",
+  ""platform"": ""DEVICE_PLATFORM_ANDROID""
+}",Your backend sends the token your app got from the Firebase SDK. Pushes with userId go to every active token of the user.,,
+Flow by Provider: PUSH · Firebase Cloud Messaging (fcm),5,Check the devices,GET,http://localhost:3000/api/v1/devices?user_id=user-42,-,user_id = user-42,x-api-key: <API_KEY>,(no body),"The token should be listed, active=true.",,
+Flow by Provider: PUSH · Firebase Cloud Messaging (fcm),6,Create the push template,POST,http://localhost:3000/api/v1/templates,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_PUSH"",
+  ""name"": ""order-shipped"",
+  ""content"": { ""subject"": ""Order shipped"", ""body"": ""Order {{orderId}} is on its way"" }
+}",subject = notification title.,id → TEMPLATE_ID,
+Flow by Provider: PUSH · Firebase Cloud Messaging (fcm),7,Send push to all the user's devices,POST,http://localhost:3000/api/v1/notifications,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_PUSH"",
+  ""userId"": ""user-42"",
+  ""template"": ""order-shipped"",
+  ""data"": { ""orderId"": ""ORD-1001"" },
+  ""metadata"": { ""deeplink"": ""app://orders/ORD-1001"" }
+}",Worker loads the user's tokens → FCM. metadata arrives in the app as the data payload (+ notificationId). Dead tokens are deactivated.,notification.id → NOTIFICATION_ID,
+Flow by Provider: PUSH · Firebase Cloud Messaging (fcm),8,Check delivery,GET,http://localhost:3000/api/v1/notifications/<NOTIFICATION_ID>,notification id = <NOTIFICATION_ID>  (notification.id from a send),-,x-api-key: <API_KEY>,(no body),status SENT; provider fcm; providerName firebase.,,
+Flow by Provider: PUSH · Firebase Cloud Messaging (fcm),9,Send push to one device (no template),POST,http://localhost:3000/api/v1/notifications,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_PUSH"",
+  ""recipient"": ""<FCM_TOKEN>"",
+  ""subject"": ""Flash sale"",
+  ""body"": ""20% off for the next 2 hours"",
+  ""metadata"": { ""deeplink"": ""app://sale"" }
+}",recipient = the device token.,notification.id → NOTIFICATION_ID,
+Flow by Provider: PUSH · Firebase Cloud Messaging (fcm),10,Check delivery,GET,http://localhost:3000/api/v1/notifications/<NOTIFICATION_ID>,notification id = <NOTIFICATION_ID>  (notification.id from a send),-,x-api-key: <API_KEY>,(no body),As step 8.,,
+"Flow by Provider: IN-APP (inbox) · stored in the hub, signalled through Firebase (fcm)",1,Check the service is ready,GET,http://localhost:9464/health/ready,-,-,(none),(no body),"Expect {""ready"":true}. If 503, start Postgres/Redis.",,
+"Flow by Provider: IN-APP (inbox) · stored in the hub, signalled through Firebase (fcm)",2,Create a tenant for this flow,POST,http://localhost:3000/api/v1/admin/tenants,-,-,"Content-Type: application/json
+x-admin-key: <ADMIN_KEY>","{
+  ""name"": ""Acme Inc."",
+  ""slug"": ""acme-inapp-demo"",
+  ""settings"": { ""appName"": ""Acme"" }
+}",Admin creates a tenant just for this flow (so only this provider is configured); starter templates otp + welcome are added; the API key is returned once. Already ran this flow? Change the slug (409 TENANT_SLUG_TAKEN).,"tenant.id → TENANT_ID
+apiKey.key → API_KEY",
+"Flow by Provider: IN-APP (inbox) · stored in the hub, signalled through Firebase (fcm)",3,Add the Firebase provider (optional: only with a real Firebase project),POST,http://localhost:3000/api/v1/providers,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_PUSH"",
+  ""provider"": ""fcm"",
+  ""name"": ""firebase"",
+  ""priority"": 1,
+  ""credentials"": {
+    ""service_account"": ""{\""type\"":\""service_account\"",\""project_id\"":\""acme-app\"",\""private_key_id\"":\""<PRIVATE_KEY_ID>\"",\""private_key\"":\""-----BEGIN PRIVATE KEY-----\\n<KEY>\\n-----END PRIVATE KEY-----\\n\"",\""client_email\"":\""firebase-adminsdk@acme-app.iam.gserviceaccount.com\""}""
+  }
+}",In-app uses the tenant's PUSH providers to tell the app to refresh. Skip it without a real Firebase project: the platform default push provider (console in dev) is used and the inbox still works.,id → PROVIDER_ID,
+"Flow by Provider: IN-APP (inbox) · stored in the hub, signalled through Firebase (fcm)",4,Register the user's device,POST,http://localhost:3000/api/v1/devices,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""userId"": ""user-42"",
+  ""token"": ""<FCM_TOKEN>"",
+  ""platform"": ""DEVICE_PLATFORM_ANDROID""
+}",As in the push flow.,,
+"Flow by Provider: IN-APP (inbox) · stored in the hub, signalled through Firebase (fcm)",5,Send in-app + visible push,POST,http://localhost:3000/api/v1/notifications,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_IN_APP"",
+  ""userId"": ""user-42"",
+  ""subject"": ""Invoice ready"",
+  ""body"": ""Invoice {{invoiceNo}} for {{amount}} is ready"",
+  ""data"": { ""invoiceNo"": ""INV-1042"", ""amount"": ""$120"" },
+  ""metadata"": { ""deeplink"": ""app://invoices/1042"" },
+  ""alsoPush"": true
+}",Worker writes the inbox message → FCM to the user's devices (visible push because alsoPush=true).,notification.id → NOTIFICATION_ID,
+"Flow by Provider: IN-APP (inbox) · stored in the hub, signalled through Firebase (fcm)",6,"Send in-app with the starter ""welcome"" template (silent signal)",POST,http://localhost:3000/api/v1/notifications,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_IN_APP"",
+  ""userId"": ""user-42"",
+  ""template"": ""welcome"",
+  ""data"": { ""name"": ""Jane"" }
+}","Without alsoPush: inbox message + silent data message (type=inbox, unreadCount) so an open app refreshes its badge.",,
+"Flow by Provider: IN-APP (inbox) · stored in the hub, signalled through Firebase (fcm)",7,Check delivery,GET,http://localhost:3000/api/v1/notifications/<NOTIFICATION_ID>,notification id = <NOTIFICATION_ID>  (notification.id from a send),-,x-api-key: <API_KEY>,(no body),status SENT.,,
+"Flow by Provider: IN-APP (inbox) · stored in the hub, signalled through Firebase (fcm)",8,Read the user's inbox,GET,http://localhost:3000/api/v1/users/user-42/inbox?unread_only=true&page.limit=20,user_id = user-42  (your user id),"unread_only = true
+page.limit = 20",x-api-key: <API_KEY>,(no body),Messages + unreadCount.,messages[0].id → INBOX_MESSAGE_ID,
+"Flow by Provider: IN-APP (inbox) · stored in the hub, signalled through Firebase (fcm)",9,Unread count (badge),GET,http://localhost:3000/api/v1/users/user-42/inbox/unread-count,user_id = user-42  (your user id),-,x-api-key: <API_KEY>,(no body),"{ ""unreadCount"": 2 }",,
+"Flow by Provider: IN-APP (inbox) · stored in the hub, signalled through Firebase (fcm)",10,Mark one read,POST,http://localhost:3000/api/v1/users/user-42/inbox/read,user_id = user-42  (your user id),-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""ids"": [""<INBOX_MESSAGE_ID>""]
+}",Returns the new unreadCount.,,
+"Flow by Provider: IN-APP (inbox) · stored in the hub, signalled through Firebase (fcm)",11,Mark all read,POST,http://localhost:3000/api/v1/users/user-42/inbox/read-all,user_id = user-42  (your user id),-,x-api-key: <API_KEY>,(no body),"{ ""unreadCount"": 0 }",,
+"Flow by Provider: IN-APP (inbox) · stored in the hub, signalled through Firebase (fcm)",12,Delete a message,DELETE,http://localhost:3000/api/v1/users/user-42/inbox/<INBOX_MESSAGE_ID>,"user_id = user-42  (your user id)
+inbox id = <INBOX_MESSAGE_ID>  (messages[0].id from List inbox messages)",-,x-api-key: <API_KEY>,(no body),Returns the new unreadCount.,,
+"Flow by Provider: COMMON · track, retry, cancel, bulk (any channel)",1,Check the service is ready,GET,http://localhost:9464/health/ready,-,-,(none),(no body),"Expect {""ready"":true}. If 503, start Postgres/Redis.",,
+"Flow by Provider: COMMON · track, retry, cancel, bulk (any channel)",2,Create a tenant for this flow,POST,http://localhost:3000/api/v1/admin/tenants,-,-,"Content-Type: application/json
+x-admin-key: <ADMIN_KEY>","{
+  ""name"": ""Acme Inc."",
+  ""slug"": ""acme-common-demo"",
+  ""settings"": { ""appName"": ""Acme"" }
+}",Admin creates a tenant just for this flow (so only this provider is configured); starter templates otp + welcome are added; the API key is returned once. Already ran this flow? Change the slug (409 TENANT_SLUG_TAKEN).,"tenant.id → TENANT_ID
+apiKey.key → API_KEY",
+"Flow by Provider: COMMON · track, retry, cancel, bulk (any channel)",3,Add a console email provider,POST,http://localhost:3000/api/v1/providers,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_EMAIL"",
+  ""provider"": ""console"",
+  ""name"": ""console-email"",
+  ""settings"": { ""from"": ""Acme <no-reply@acme.com>"" }
+}","Demo-safe: logged, not sent.",,
+"Flow by Provider: COMMON · track, retry, cancel, bulk (any channel)",4,Add a console SMS provider,POST,http://localhost:3000/api/v1/providers,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_SMS"",
+  ""provider"": ""console"",
+  ""name"": ""console-sms"",
+  ""settings"": { ""from"": ""+14155550199"" }
+}","Demo-safe: logged, not sent.",,
+"Flow by Provider: COMMON · track, retry, cancel, bulk (any channel)",5,List failed notifications,GET,http://localhost:3000/api/v1/notifications?status=NOTIFICATION_STATUS_FAILED&page.limit=20,-,"status = NOTIFICATION_STATUS_FAILED
+page.limit = 20",x-api-key: <API_KEY>,(no body),"Newest first. With console providers nothing fails, so this is empty and step 6 has nothing to retry: use a provider with wrong credentials to show it.",notifications[0].id → FAILED_ID,
+"Flow by Provider: COMMON · track, retry, cancel, bulk (any channel)",6,Retry a failed one,POST,http://localhost:3000/api/v1/notifications/<FAILED_ID>/retry,notification id = <FAILED_ID>  (id of a FAILED notification (List notifications)),-,x-api-key: <API_KEY>,(no body),"FAILED → QUEUED, sent again.",,
+"Flow by Provider: COMMON · track, retry, cancel, bulk (any channel)",7,Schedule a send,POST,http://localhost:3000/api/v1/notifications,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""channel"": ""CHANNEL_EMAIL"",
+  ""recipient"": ""jane@example.com"",
+  ""template"": ""welcome"",
+  ""data"": { ""name"": ""Jane"" },
+  ""scheduledAt"": ""2026-11-20T09:00:00Z""
+}","Set scheduledAt in the future, at most 30 days ahead (change the date when you demo). queue.state = delayed, queue.runAt = the time.",notification.id → SCHEDULED_ID,
+"Flow by Provider: COMMON · track, retry, cancel, bulk (any channel)",8,Cancel it,POST,http://localhost:3000/api/v1/notifications/<SCHEDULED_ID>/cancel,notification id = <SCHEDULED_ID>  (notification.id from the scheduled send),-,x-api-key: <API_KEY>,(no body),QUEUED → CANCELLED.,,
+"Flow by Provider: COMMON · track, retry, cancel, bulk (any channel)",9,"Bulk send (campaign, up to 500)",POST,http://localhost:3000/api/v1/notifications/bulk,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""notifications"": [
+    { ""channel"": ""CHANNEL_EMAIL"", ""recipient"": ""bob@example.com"", ""subject"": ""Sale"", ""body"": ""Sale starts now!"" },
+    { ""channel"": ""CHANNEL_SMS"", ""recipient"": ""+14155550101"", ""body"": ""Sale starts now!"" },
+    { ""channel"": ""CHANNEL_PUSH"", ""userId"": ""user-42"", ""subject"": ""Sale"", ""body"": ""Sale starts now!"" }
+  ]
+}","Low priority, so OTPs are never delayed.",,
+"Flow by Provider: COMMON · track, retry, cancel, bulk (any channel)",10,Bulk: same message to many recipients,POST,http://localhost:3000/api/v1/notifications/bulk,-,-,"Content-Type: application/json
+x-api-key: <API_KEY>","{
+  ""notifications"": [
+    {
+      ""channel"": ""CHANNEL_EMAIL"",
+      ""recipients"": [""jane@example.com"", ""bob@example.com""],
+      ""subject"": ""Your order has shipped"",
+      ""body"": ""Order ORD-1001 is on its way: https://acme.com/t/ORD-1001"",
+      ""idempotencyKey"": ""order-shipped-ORD-1001""
+    },
+    {
+      ""channel"": ""CHANNEL_SMS"",
+      ""recipient"": ""+14155550101, +14155550102"",
+      ""body"": ""Sale starts now!""
+    },
+    {
+      ""channel"": ""CHANNEL_PUSH"",
+      ""userIds"": [""user-42"", ""user-43""],
+      ""subject"": ""Sale"",
+      ""body"": ""Sale starts now!""
+    }
+  ]
+}","One item, many targets: recipients (list) or a comma-separated recipient for email/SMS/push tokens, userIds for push/in-app. Each target becomes its own notification (6 here, accepted = 6), in order. The idempotencyKey gets a per-recipient suffix, so repeating the request replays instead of sending twice. Max 500 notifications after expanding.",,

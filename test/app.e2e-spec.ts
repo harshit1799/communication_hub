@@ -140,6 +140,43 @@ describe('Communication Hub over gRPC (e2e)', () => {
     expect(new Set(res.notifications.map((n: { id: string }) => n.id)).size).toBe(3);
   });
 
+  it('fans out one bulk item to several recipients, each with its own notification', async () => {
+    const idempotencyKey = `k-${randomUUID()}`;
+    const bulk = () =>
+      hub.call(
+        'NotificationService',
+        'SendBulkNotifications',
+        {
+          notifications: [
+            { channel: 'CHANNEL_EMAIL', recipient: 'a@example.com, b@example.com', subject: 's', body: 'hi', idempotencyKey },
+            { channel: 'CHANNEL_SMS', recipients: ['+14155550110', '+14155550111'], body: 'hi' },
+            { channel: 'CHANNEL_PUSH', userIds: ['u-a', 'u-b'], body: 'hi' },
+          ],
+        },
+        hub.tenant(key),
+      );
+    const res = await bulk();
+    expect(res).toMatchObject({ accepted: 6, replayed: 0 });
+    expect(res.notifications.map((n: { recipient?: string; userId?: string }) => n.recipient ?? n.userId)).toEqual([
+      'a@example.com',
+      'b@example.com',
+      '+14155550110',
+      '+14155550111',
+      'u-a',
+      'u-b',
+    ]);
+    // The per-recipient idempotency keys make the whole request safe to repeat.
+    const again = await bulk();
+    expect(again.replayed).toBe(2);
+    expect(again.notifications.slice(0, 2).map((n: { id: string }) => n.id)).toEqual(res.notifications.slice(0, 2).map((n: { id: string }) => n.id));
+
+    await hub.expectError(
+      send({ channel: 'CHANNEL_SMS', recipients: ['+14155550110', '+14155550111'], body: 'hi' }),
+      status.INVALID_ARGUMENT,
+      'VALIDATION_ERROR',
+    );
+  });
+
   it('pushes to every registered device of a user', async () => {
     await hub.call('DeviceService', 'RegisterDevice', { userId: 'u-1', token: `tok-${randomUUID()}`, platform: 'DEVICE_PLATFORM_ANDROID' }, hub.tenant(key));
     const res = await send({ channel: 'CHANNEL_PUSH', userId: 'u-1', subject: 'Hi', template: 'welcome', data: struct({ name: 'Jane' }) });

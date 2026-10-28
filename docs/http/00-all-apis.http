@@ -1,0 +1,632 @@
+# Communication Hub: every API, step by step
+#
+# Run top to bottom: health → tenant + API key → providers → templates → devices → send →
+# track → inbox → clean up. 2.0a / 2.0b add console providers (logged, not sent) for a safe demo.
+#
+# Open in VS Code with the "REST Client" extension (humao.rest-client): click "Send Request"
+# above each request, top to bottom. Ids and the API key are taken from earlier responses
+# automatically. Replace <...> values in bodies with your own (passwords, tokens).
+# {{name}}-style placeholders inside template bodies are Handlebars for the hub: REST Client
+# sends them as they are (it may underline them as unknown variables; that is fine).
+# No REST Client? Copy the method, URL, headers and JSON body into Swagger/Postman.
+
+@baseUrl = http://localhost:3000/api
+@opsUrl = http://localhost:9464
+# ADMIN_API_KEY from your .env
+@ADMIN_KEY = paste-your-ADMIN_API_KEY-here
+# FCM registration token from your app (push / in-app only)
+@FCM_TOKEN = paste-a-device-token-here
+
+
+### ===== STEP 0: Check the service  ·  anyone =====
+
+### 0.1 · Liveness
+# Ops server answers directly (no DB). Use it to check the process is up.
+# Expected: 200
+# @name r1_liveness
+GET {{opsUrl}}/health/live
+
+### 0.2 · Readiness
+# Ops server pings Postgres and Redis. 200 = ready, 503 = a dependency is down.
+# Expected: 200
+# @name r2_readiness
+GET {{opsUrl}}/health/ready
+
+### 0.3 · Prometheus metrics
+# Prometheus metrics (requests, queue depth, deliveries per provider). Scraped by Prometheus, shown in
+# Grafana.
+# Expected: 200
+# @name r3_prometheus_metrics
+GET {{opsUrl}}/metrics
+
+### 0.4 · gRPC health check
+# Standard gRPC health check on :50051.
+# @name r4_grpc_health_check
+gRPC grpcurl -plaintext localhost:50051 grpc.health.v1.Health/Check
+
+{ "service": "" }
+
+
+### ===== STEP 1: Create the tenant and its API key  ·  Platform admin =====
+
+### 1.1 · Create tenant
+# Admin key checked → tenant row created → starter templates (otp, welcome) copied → first API key
+# generated (only its hash is stored) → key returned ONCE.
+# Expected: 201
+# @name r5_create_tenant
+POST {{baseUrl}}/v1/admin/tenants
+Content-Type: application/json
+x-admin-key: {{ADMIN_KEY}}
+
+{
+  "name": "Acme Inc.",
+  "slug": "acme",
+  "settings": { "appName": "Acme" }
+}
+
+### 1.2 · List tenants
+# Admin key checked → all tenants from DB.
+# Expected: 200
+# @name r6_list_tenants
+GET {{baseUrl}}/v1/admin/tenants
+x-admin-key: {{ADMIN_KEY}}
+
+### 1.3 · Get tenant
+# Admin key checked → one tenant by id.
+# Path params: tenant id = <TENANT_ID>  (tenant.id from Create tenant)
+# Expected: 200
+# @name r7_get_tenant
+GET {{baseUrl}}/v1/admin/tenants/{{r5_create_tenant.response.body.$.tenant.id}}
+x-admin-key: {{ADMIN_KEY}}
+
+### 1.4 · Update tenant (rename, rebrand, deactivate)
+# Admin key checked → given fields updated, settings merged → tenant cache cleared. active=false
+# blocks every key of the tenant.
+# Path params: tenant id = <TENANT_ID>  (tenant.id from Create tenant)
+# Expected: 200
+# @name r8_update_tenant_rename_rebrand_deactiva
+PATCH {{baseUrl}}/v1/admin/tenants/{{r5_create_tenant.response.body.$.tenant.id}}
+Content-Type: application/json
+x-admin-key: {{ADMIN_KEY}}
+
+{
+  "name": "Acme Corporation",
+  "settings": { "appName": "Acme Corp" },
+  "active": true
+}
+
+### 1.5 · Create another API key
+# Admin key checked → new key generated, hash stored → key returned ONCE.
+# Path params: tenant id = <TENANT_ID>  (tenant.id from Create tenant)
+# Expected: 201
+# @name r9_create_another_api_key
+POST {{baseUrl}}/v1/admin/tenants/{{r5_create_tenant.response.body.$.tenant.id}}/api-keys
+Content-Type: application/json
+x-admin-key: {{ADMIN_KEY}}
+
+{
+  "name": "backend-prod",
+  "expiresAt": "2027-12-31T00:00:00Z"
+}
+
+### 1.6 · List API keys
+# Admin key checked → the tenant's keys (prefix only, never the key).
+# Path params: tenant id = <TENANT_ID>  (tenant.id from Create tenant)
+# Expected: 200
+# @name r10_list_api_keys
+GET {{baseUrl}}/v1/admin/tenants/{{r5_create_tenant.response.body.$.tenant.id}}/api-keys
+x-admin-key: {{ADMIN_KEY}}
+
+
+### ===== STEP 2: Add providers and From addresses  ·  Tenant =====
+
+### 2.0a · Create demo email provider (console)
+# API key → tenant → config validated (vendor rules, From names) → saved in provider_configs
+# (credentials encrypted) → Redis cache providers:<tenant>:CHANNEL_EMAIL refreshed → next email uses
+# it.
+# Expected: 201
+# @name r11_create_demo_email_provider_console
+POST {{baseUrl}}/v1/providers
+Content-Type: application/json
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+{
+  "channel": "CHANNEL_EMAIL",
+  "provider": "console",
+  "name": "demo-email",
+  "priority": 1,
+  "settings": { "from": "Acme <no-reply@acme.com>" },
+  "fromAddresses": {
+    "billing": "Acme Billing <billing@acme.com>",
+    "support": "Acme Support <support@acme.com>"
+  },
+  "limits": { "rateMax": 20, "rateDurationMs": 1000, "maxAttempts": 3, "backoffMs": 2000 }
+}
+
+### 2.0b · Create demo SMS provider (console)
+# Same as 2.0a for CHANNEL_SMS.
+# Expected: 201
+# @name r12_create_demo_sms_provider_console
+POST {{baseUrl}}/v1/providers
+Content-Type: application/json
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+{
+  "channel": "CHANNEL_SMS",
+  "provider": "console",
+  "name": "demo-sms",
+  "priority": 1,
+  "settings": { "from": "+14155550100" },
+  "fromAddresses": { "india": "ACMEIN" }
+}
+
+### 2.1 · Create provider
+# Same as 2.0a with a real SMTP account: credentials encrypted, cache refreshed, used by the next
+# email.
+# Expected: 201
+# @name r13_create_provider
+POST {{baseUrl}}/v1/providers
+Content-Type: application/json
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+{
+  "channel": "CHANNEL_EMAIL",
+  "provider": "smtp",
+  "name": "smtp-main",
+  "priority": 1,
+  "settings": { "host": "smtp.acme.com", "port": "587", "secure": "false", "from": "Acme <no-reply@acme.com>" },
+  "credentials": { "user": "mailer@acme.com", "pass": "<SMTP_PASSWORD>" },
+  "fromAddresses": {
+    "support": "Acme Support <support@acme.com>",
+    "billing": "Acme Billing <billing@acme.com>"
+  },
+  "limits": { "rateMax": 20, "rateDurationMs": 1000, "maxAttempts": 3, "backoffMs": 2000 }
+}
+
+### 2.2 · List providers
+# Tenant's providers from Redis/DB, in failover (priority) order. Credentials never returned, only
+# their names.
+# Query params: channel = CHANNEL_EMAIL
+# Expected: 200
+# @name r14_list_providers
+GET {{baseUrl}}/v1/providers?channel=CHANNEL_EMAIL
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+### 2.3 · Get provider
+# One provider by id.
+# Path params: provider id = <PROVIDER_ID>  (id from Create provider)
+# Expected: 200
+# @name r15_get_provider
+GET {{baseUrl}}/v1/providers/{{r13_create_provider.response.body.$.id}}
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+### 2.4 · Update provider
+# Validated → merged into the stored config → Redis cache refreshed → applies to the next message (no
+# restart).
+# Path params: provider id = <PROVIDER_ID>  (id from Create provider)
+# Expected: 200
+# @name r16_update_provider
+PATCH {{baseUrl}}/v1/providers/{{r13_create_provider.response.body.$.id}}
+Content-Type: application/json
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+{
+  "priority": 5,
+  "active": true,
+  "settings": { "from": "Acme <hello@acme.com>" },
+  "fromAddresses": { "news": "Acme News <news@acme.com>", "alerts": "" },
+  "credentials": { "user": "mailer@acme.com", "pass": "<NEW_PASSWORD>" },
+  "limits": { "maxConcurrency": 0, "maxAttempts": 5 }
+}
+
+### 2.6 · List From addresses
+# Every From (default + named) of every active email/SMS provider, with the provider that owns it.
+# Pick a name here for "from" when sending.
+# Query params: channel = CHANNEL_EMAIL
+# Expected: 200
+# @name r17_list_from_addresses
+GET {{baseUrl}}/v1/from-addresses?channel=CHANNEL_EMAIL
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+
+### ===== STEP 3: Templates  ·  Tenant =====
+
+### 3.1 · Create template
+# Handlebars compiled to check it → template + version 1 saved and activated.
+# Expected: 201
+# @name r18_create_template
+POST {{baseUrl}}/v1/templates
+Content-Type: application/json
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+{
+  "channel": "CHANNEL_EMAIL",
+  "name": "invoice-ready",
+  "description": "Invoice notification",
+  "content": {
+    "subject": "Invoice {{invoiceNo}} from {{appName}}",
+    "html": "<p>Hi {{name}}, your invoice <b>{{invoiceNo}}</b> of {{amount}} is ready.</p>",
+    "body": "Hi {{name}}, your invoice {{invoiceNo}} of {{amount}} is ready."
+  }
+}
+
+### 3.2 · List templates
+# The tenant's templates (starters included), paginated.
+# Query params: channel = CHANNEL_EMAIL; page.limit = 20
+# Expected: 200
+# @name r19_list_templates
+GET {{baseUrl}}/v1/templates?channel=CHANNEL_EMAIL&page.limit=20
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+### 3.3 · Get template
+# One template with its active and latest version numbers.
+# Path params: template id = <TEMPLATE_ID>  (id from Create template)
+# Expected: 200
+# @name r20_get_template
+GET {{baseUrl}}/v1/templates/{{r18_create_template.response.body.$.id}}
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+### 3.4 · Publish a new version
+# New version compiled and saved; activate=true makes it the one new sends use. Already queued
+# messages keep their version.
+# Path params: template id = <TEMPLATE_ID>  (id from Create template)
+# Expected: 201
+# @name r21_publish_a_new_version
+POST {{baseUrl}}/v1/templates/{{r18_create_template.response.body.$.id}}/versions
+Content-Type: application/json
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+{
+  "content": {
+    "subject": "Your {{appName}} invoice {{invoiceNo}}",
+    "html": "<p>Hello {{name}}, invoice <b>{{invoiceNo}}</b> ({{amount}}) is ready.</p>"
+  },
+  "activate": true
+}
+
+### 3.5 · List versions
+# All versions, newest first; active=true marks the live one.
+# Path params: template id = <TEMPLATE_ID>  (id from Create template)
+# Expected: 200
+# @name r22_list_versions
+GET {{baseUrl}}/v1/templates/{{r18_create_template.response.body.$.id}}/versions
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+### 3.6 · Activate a version (publish / roll back)
+# Switches the active version (roll back or publish a staged one).
+# Path params: template id = <TEMPLATE_ID>  (id from Create template); version = 1
+# Expected: 200
+# @name r23_activate_a_version_publish_roll_back
+POST {{baseUrl}}/v1/templates/{{r18_create_template.response.body.$.id}}/versions/1/activate
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+### 3.7 · Preview
+# Renders the version with your data. Nothing is stored or sent.
+# Path params: template id = <TEMPLATE_ID>  (id from Create template)
+# Expected: 200
+# @name r24_preview
+POST {{baseUrl}}/v1/templates/{{r18_create_template.response.body.$.id}}/preview
+Content-Type: application/json
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+{
+  "version": 2,
+  "data": { "name": "Jane", "invoiceNo": "INV-1042", "amount": "$120" }
+}
+
+
+### ===== STEP 4: Register devices (push and in-app)  ·  Tenant backend =====
+
+### 4.1 · Register device
+# Stores the FCM token for the user (upsert). Push and in-app sends with userId go to all the user's
+# active tokens.
+# Expected: 200
+# @name r25_register_device
+POST {{baseUrl}}/v1/devices
+Content-Type: application/json
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+{
+  "userId": "user-42",
+  "token": "{{FCM_TOKEN}}",
+  "platform": "DEVICE_PLATFORM_ANDROID"
+}
+
+### 4.2 · List a user's devices
+# The user's registered devices.
+# Query params: user_id = user-42
+# Expected: 200
+# @name r26_list_a_user_s_devices
+GET {{baseUrl}}/v1/devices?user_id=user-42
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+
+### ===== STEP 5: Send notifications  ·  Tenant backend =====
+
+### 5.1 · Send (email with template)
+# Validate → template active version pinned → "from" name resolved to the providers that have it →
+# saved (recipient + data encrypted) as QUEUED → job on notifications-email → 202 with queue state.
+# Worker: render → provider (priority order, rate/concurrency check in Redis) → SENT or
+# retry/failover.
+# Expected: 202
+# @name r27_send_email_with_template
+POST {{baseUrl}}/v1/notifications
+Content-Type: application/json
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+{
+  "channel": "CHANNEL_EMAIL",
+  "recipient": "jane@example.com",
+  "template": "invoice-ready",
+  "data": { "name": "Jane", "invoiceNo": "INV-1042", "amount": "$120" },
+  "from": "billing",
+  "idempotencyKey": "invoice-INV-1042"
+}
+
+### 5.2 · Send (email without template)
+# Same as 5.1 without a template: subject/body sent as given ({{placeholders}} still filled from
+# data). "from" as a full address.
+# Expected: 202
+# @name r28_send_email_without_template
+POST {{baseUrl}}/v1/notifications
+Content-Type: application/json
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+{
+  "channel": "CHANNEL_EMAIL",
+  "recipient": "jane@example.com",
+  "subject": "Your receipt",
+  "body": "Thanks for your payment, {{name}}.",
+  "data": { "name": "Jane" },
+  "from": "Acme Billing <billing@acme.com>"
+}
+
+### 5.3 · Send (SMS OTP, high priority)
+# Same flow on notifications-sms with priority 1 (high) so OTPs go before everything else. "india" →
+# only SMS providers with that From name.
+# Expected: 202
+# @name r29_send_sms_otp_high_priority
+POST {{baseUrl}}/v1/notifications
+Content-Type: application/json
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+{
+  "channel": "CHANNEL_SMS",
+  "recipient": "+919876543210",
+  "template": "otp",
+  "data": { "code": "482913", "expiresInMinutes": 5 },
+  "priority": "PRIORITY_HIGH",
+  "from": "india",
+  "idempotencyKey": "otp-user-42-1730000000"
+}
+
+### 5.4 · Send (push to all of a user's devices)
+# Saved → job on notifications-push → worker loads all active device tokens of userId → FCM (tenant's
+# fcm provider). Dead tokens are deactivated.
+# Expected: 202
+# @name r30_send_push_to_all_of_a_user_s_devices
+POST {{baseUrl}}/v1/notifications
+Content-Type: application/json
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+{
+  "channel": "CHANNEL_PUSH",
+  "userId": "user-42",
+  "subject": "Order shipped",
+  "body": "Order {{orderId}} is on its way",
+  "data": { "orderId": "ORD-77" },
+  "metadata": { "deeplink": "app://orders/77" }
+}
+
+### 5.5 · Send (in-app inbox + push)
+# Saved → worker writes the message to the user's inbox → FCM signal to the devices (visible push
+# because alsoPush=true, else silent data message type=inbox).
+# Expected: 202
+# @name r31_send_in_app_inbox_push
+POST {{baseUrl}}/v1/notifications
+Content-Type: application/json
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+{
+  "channel": "CHANNEL_IN_APP",
+  "userId": "user-42",
+  "subject": "Invoice ready",
+  "body": "Invoice {{invoiceNo}} is ready",
+  "data": { "invoiceNo": "INV-1042" },
+  "metadata": { "deeplink": "app://invoices/1042" },
+  "alsoPush": true
+}
+
+### 5.6 · Send (scheduled)
+# Saved as QUEUED → delayed job that runs at scheduledAt. Can be cancelled until then (6.4).
+# Expected: 202
+# @name r32_send_scheduled
+POST {{baseUrl}}/v1/notifications
+Content-Type: application/json
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+{
+  "channel": "CHANNEL_EMAIL",
+  "recipient": "jane@example.com",
+  "template": "welcome",
+  "data": { "name": "Jane" },
+  "scheduledAt": "2026-11-20T09:00:00Z"
+}
+
+### 5.7 · Send bulk (campaigns, up to 500)
+# Each item validated and saved → jobs added with low priority (10) so they never delay single sends.
+# Expected: 202
+# @name r33_send_bulk_campaigns_up_to_500
+POST {{baseUrl}}/v1/notifications/bulk
+Content-Type: application/json
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+{
+  "notifications": [
+    { "channel": "CHANNEL_SMS", "recipient": "+14155550101", "body": "Sale starts now!" },
+    { "channel": "CHANNEL_EMAIL", "recipient": "bob@example.com", "subject": "Sale", "body": "Sale starts now!", "from": "support" },
+    { "channel": "CHANNEL_PUSH", "userId": "user-42", "subject": "Sale", "body": "Sale starts now!" }
+  ]
+}
+
+### 5.8 · Send bulk: same message to many recipients
+# One item, many targets. Email / SMS / push tokens: "recipients": [...] or a comma-separated
+# "recipient". Push / in-app users: "userIds": [...]. Each target becomes its own notification (own
+# id, status, retry), in order, duplicates dropped; accepted = number of targets. idempotencyKey gets
+# a per-recipient suffix ("key:<hash>"), so repeating the request replays instead of sending twice. At
+# most 500 notifications after expanding. Several recipients and several userIds in one item is a
+# VALIDATION_ERROR; recipients / userIds on POST /v1/notifications (single send) is a
+# VALIDATION_ERROR.
+# Expected: 202
+# @name r34_send_bulk_same_message_to_many_recip
+POST {{baseUrl}}/v1/notifications/bulk
+Content-Type: application/json
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+{
+  "notifications": [
+    {
+      "channel": "CHANNEL_EMAIL",
+      "recipients": ["jane@example.com", "bob@example.com"],
+      "template": "invoice-ready",
+      "data": { "name": "Jane", "invoiceNo": "INV-1042", "amount": "$120" },
+      "from": "billing",
+      "idempotencyKey": "invoice-ready-INV-1042"
+    },
+    {
+      "channel": "CHANNEL_SMS",
+      "recipient": "+919876543210, +919876543211",
+      "template": "otp",
+      "data": { "code": "482913", "expiresInMinutes": 5 },
+      "from": "india"
+    },
+    {
+      "channel": "CHANNEL_PUSH",
+      "userIds": ["user-42", "user-43"],
+      "subject": "Sale",
+      "body": "Sale starts now!"
+    }
+  ]
+}
+
+
+### ===== STEP 6: Track, retry and cancel  ·  Tenant backend =====
+
+### 6.1 · Get notification
+# Notification + every provider attempt (which provider, which From, error, duration) + live BullMQ
+# job state.
+# Path params: notification id = <NOTIFICATION_ID>  (notification.id from a send)
+# Expected: 200
+# @name r35_get_notification
+GET {{baseUrl}}/v1/notifications/{{r27_send_email_with_template.response.body.$.notification.id}}
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+### 6.2 · List notifications
+# Tenant's notifications, newest first, filtered. recipient filter uses a keyed hash (data is
+# encrypted).
+# Query params: status = NOTIFICATION_STATUS_FAILED; channel = CHANNEL_EMAIL; page.limit = 20
+# Expected: 200
+# @name r36_list_notifications
+GET {{baseUrl}}/v1/notifications?status=NOTIFICATION_STATUS_FAILED&channel=CHANNEL_EMAIL&page.limit=20
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+### 6.3 · Retry a failed notification
+# FAILED → QUEUED, new job; renders the same template version again.
+# Path params: notification id = <FAILED_ID>  (id of a FAILED notification (List notifications))
+# Expected: 200
+# @name r37_retry_a_failed_notification
+POST {{baseUrl}}/v1/notifications/{{r36_list_notifications.response.body.$.notifications[0].id}}/retry
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+### 6.4 · Cancel a queued / scheduled notification
+# QUEUED/RETRYING → CANCELLED; the job is removed from the queue.
+# Path params: notification id = <SCHEDULED_ID>  (notification.id from the scheduled send)
+# Expected: 200
+# @name r38_cancel_a_queued_scheduled_notificati
+POST {{baseUrl}}/v1/notifications/{{r32_send_scheduled.response.body.$.notification.id}}/cancel
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+
+### ===== STEP 7: In-app inbox  ·  Tenant backend, for the signed-in user =====
+
+### 7.1 · List inbox messages
+# The user's inbox messages (written by in-app sends) + unread count.
+# Path params: user_id = user-42  (your user id)
+# Query params: unread_only = true; page.limit = 20
+# Expected: 200
+# @name r39_list_inbox_messages
+GET {{baseUrl}}/v1/users/user-42/inbox?unread_only=true&page.limit=20
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+### 7.2 · Unread count (badge)
+# Unread count only (for the app badge).
+# Path params: user_id = user-42  (your user id)
+# Expected: 200
+# @name r40_unread_count_badge
+GET {{baseUrl}}/v1/users/user-42/inbox/unread-count
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+### 7.3 · Mark messages read
+# Marks the given messages read → new unread count.
+# Path params: user_id = user-42  (your user id)
+# Expected: 200
+# @name r41_mark_messages_read
+POST {{baseUrl}}/v1/users/user-42/inbox/read
+Content-Type: application/json
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+{
+  "ids": ["{{r39_list_inbox_messages.response.body.$.messages[0].id}}"]
+}
+
+### 7.4 · Mark all read
+# Marks all read → 0.
+# Path params: user_id = user-42  (your user id)
+# Expected: 200
+# @name r42_mark_all_read
+POST {{baseUrl}}/v1/users/user-42/inbox/read-all
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+### 7.5 · Delete inbox message
+# Deletes one message → new unread count.
+# Path params: user_id = user-42  (your user id); inbox id = <INBOX_MESSAGE_ID>  (messages[0].id from List inbox messages)
+# Expected: 200
+# @name r43_delete_inbox_message
+DELETE {{baseUrl}}/v1/users/user-42/inbox/{{r39_list_inbox_messages.response.body.$.messages[0].id}}
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+
+### ===== STEP 8: Clean up (destructive: run last)  ·  Admin / Tenant =====
+
+### 8.1 · Revoke API key
+# Key revoked immediately; calls with it get 401.
+# Path params: tenant id = <TENANT_ID>  (tenant.id from Create tenant); api-key id = <KEY_ID>  (apiKey.id from Create API key)
+# Expected: 204
+# @name r44_revoke_api_key
+DELETE {{baseUrl}}/v1/admin/tenants/{{r5_create_tenant.response.body.$.tenant.id}}/api-keys/{{r9_create_another_api_key.response.body.$.apiKey.id}}
+x-admin-key: {{ADMIN_KEY}}
+
+### 8.2 · Delete provider
+# Provider deleted → Redis cache refreshed → the next message uses the remaining providers (or the
+# platform default).
+# Path params: provider id = <PROVIDER_ID>  (id from Create provider)
+# Expected: 204
+# @name r45_delete_provider
+DELETE {{baseUrl}}/v1/providers/{{r13_create_provider.response.body.$.id}}
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+### 8.3 · Archive
+# Template archived: new sends with it get 409; queued ones still go out.
+# Path params: template id = <TEMPLATE_ID>  (id from Create template)
+# Expected: 200
+# @name r46_archive
+POST {{baseUrl}}/v1/templates/{{r18_create_template.response.body.$.id}}/archive
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}
+
+### 8.4 · Unregister device
+# Device token removed; the user stops getting push on it.
+# Path params: token = <FCM_TOKEN>  (the device token from your app)
+# Expected: 204
+# @name r47_unregister_device
+DELETE {{baseUrl}}/v1/devices/{{FCM_TOKEN}}
+x-api-key: {{r5_create_tenant.response.body.$.apiKey.key}}

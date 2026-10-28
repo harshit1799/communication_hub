@@ -1,0 +1,152 @@
+# Flow: COMMON · track, retry, cancel, bulk (any channel)
+#
+# A complete flow on its own tenant: create the tenant, add the provider, (template),
+# send, check which provider and From delivered it.
+#
+# Open in VS Code with the "REST Client" extension (humao.rest-client): click "Send Request"
+# above each request, top to bottom. Ids and the API key are taken from earlier responses
+# automatically. Replace <...> values in bodies with your own (passwords, tokens).
+# {{name}}-style placeholders inside template bodies are Handlebars for the hub: REST Client
+# sends them as they are (it may underline them as unknown variables; that is fine).
+# No REST Client? Copy the method, URL, headers and JSON body into Swagger/Postman.
+
+@baseUrl = http://localhost:3000/api
+@opsUrl = http://localhost:9464
+# ADMIN_API_KEY from your .env
+@ADMIN_KEY = paste-your-ADMIN_API_KEY-here
+# FCM registration token from your app (push / in-app only)
+@FCM_TOKEN = paste-a-device-token-here
+
+### 1 · Check the service is ready
+# Expect {"ready":true}. If 503, start Postgres/Redis.
+# @name r1_check_the_service_is_ready
+GET {{opsUrl}}/health/ready
+
+### 2 · Create a tenant for this flow
+# Admin creates a tenant just for this flow (so only this provider is configured); starter templates
+# otp + welcome are added; the API key is returned once. Already ran this flow? Change the slug (409
+# TENANT_SLUG_TAKEN).
+# @name r2_create_a_tenant_for_this_flow
+POST {{baseUrl}}/v1/admin/tenants
+Content-Type: application/json
+x-admin-key: {{ADMIN_KEY}}
+
+{
+  "name": "Acme Inc.",
+  "slug": "acme-common-demo",
+  "settings": { "appName": "Acme" }
+}
+
+### 3 · Add a console email provider
+# Demo-safe: logged, not sent.
+# @name r3_add_a_console_email_provider
+POST {{baseUrl}}/v1/providers
+Content-Type: application/json
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+{
+  "channel": "CHANNEL_EMAIL",
+  "provider": "console",
+  "name": "console-email",
+  "settings": { "from": "Acme <no-reply@acme.com>" }
+}
+
+### 4 · Add a console SMS provider
+# Demo-safe: logged, not sent.
+# @name r4_add_a_console_sms_provider
+POST {{baseUrl}}/v1/providers
+Content-Type: application/json
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+{
+  "channel": "CHANNEL_SMS",
+  "provider": "console",
+  "name": "console-sms",
+  "settings": { "from": "+14155550199" }
+}
+
+### 5 · List failed notifications
+# Newest first. With console providers nothing fails, so this is empty and step 6 has nothing to
+# retry: use a provider with wrong credentials to show it.
+# Query params: status = NOTIFICATION_STATUS_FAILED; page.limit = 20
+# @name r5_list_failed_notifications
+GET {{baseUrl}}/v1/notifications?status=NOTIFICATION_STATUS_FAILED&page.limit=20
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+### 6 · Retry a failed one
+# FAILED → QUEUED, sent again.
+# Path params: notification id = <FAILED_ID>  (id of a FAILED notification (List notifications))
+# @name r6_retry_a_failed_one
+POST {{baseUrl}}/v1/notifications/{{r5_list_failed_notifications.response.body.$.notifications[0].id}}/retry
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+### 7 · Schedule a send
+# Set scheduledAt in the future, at most 30 days ahead (change the date when you demo). queue.state =
+# delayed, queue.runAt = the time.
+# @name r7_schedule_a_send
+POST {{baseUrl}}/v1/notifications
+Content-Type: application/json
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+{
+  "channel": "CHANNEL_EMAIL",
+  "recipient": "jane@example.com",
+  "template": "welcome",
+  "data": { "name": "Jane" },
+  "scheduledAt": "2026-11-20T09:00:00Z"
+}
+
+### 8 · Cancel it
+# QUEUED → CANCELLED.
+# Path params: notification id = <SCHEDULED_ID>  (notification.id from the scheduled send)
+# @name r8_cancel_it
+POST {{baseUrl}}/v1/notifications/{{r7_schedule_a_send.response.body.$.notification.id}}/cancel
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+### 9 · Bulk send (campaign, up to 500)
+# Low priority, so OTPs are never delayed.
+# @name r9_bulk_send_campaign_up_to_500
+POST {{baseUrl}}/v1/notifications/bulk
+Content-Type: application/json
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+{
+  "notifications": [
+    { "channel": "CHANNEL_EMAIL", "recipient": "bob@example.com", "subject": "Sale", "body": "Sale starts now!" },
+    { "channel": "CHANNEL_SMS", "recipient": "+14155550101", "body": "Sale starts now!" },
+    { "channel": "CHANNEL_PUSH", "userId": "user-42", "subject": "Sale", "body": "Sale starts now!" }
+  ]
+}
+
+### 10 · Bulk: same message to many recipients
+# One item, many targets: recipients (list) or a comma-separated recipient for email/SMS/push tokens,
+# userIds for push/in-app. Each target becomes its own notification (6 here, accepted = 6), in order.
+# The idempotencyKey gets a per-recipient suffix, so repeating the request replays instead of sending
+# twice. Max 500 notifications after expanding.
+# @name r10_bulk_same_message_to_many_recipients
+POST {{baseUrl}}/v1/notifications/bulk
+Content-Type: application/json
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+{
+  "notifications": [
+    {
+      "channel": "CHANNEL_EMAIL",
+      "recipients": ["jane@example.com", "bob@example.com"],
+      "subject": "Your order has shipped",
+      "body": "Order ORD-1001 is on its way: https://acme.com/t/ORD-1001",
+      "idempotencyKey": "order-shipped-ORD-1001"
+    },
+    {
+      "channel": "CHANNEL_SMS",
+      "recipient": "+14155550101, +14155550102",
+      "body": "Sale starts now!"
+    },
+    {
+      "channel": "CHANNEL_PUSH",
+      "userIds": ["user-42", "user-43"],
+      "subject": "Sale",
+      "body": "Sale starts now!"
+    }
+  ]
+}

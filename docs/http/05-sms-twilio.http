@@ -1,0 +1,130 @@
+# Flow: SMS · Twilio
+#
+# A complete flow on its own tenant: create the tenant, add the provider, (template),
+# send, check which provider and From delivered it.
+#
+# Open in VS Code with the "REST Client" extension (humao.rest-client): click "Send Request"
+# above each request, top to bottom. Ids and the API key are taken from earlier responses
+# automatically. Replace <...> values in bodies with your own (passwords, tokens).
+# {{name}}-style placeholders inside template bodies are Handlebars for the hub: REST Client
+# sends them as they are (it may underline them as unknown variables; that is fine).
+# No REST Client? Copy the method, URL, headers and JSON body into Swagger/Postman.
+
+@baseUrl = http://localhost:3000/api
+@opsUrl = http://localhost:9464
+# ADMIN_API_KEY from your .env
+@ADMIN_KEY = paste-your-ADMIN_API_KEY-here
+# FCM registration token from your app (push / in-app only)
+@FCM_TOKEN = paste-a-device-token-here
+
+### 1 · Check the service is ready
+# Expect {"ready":true}. If 503, start Postgres/Redis.
+# @name r1_check_the_service_is_ready
+GET {{opsUrl}}/health/ready
+
+### 2 · Create a tenant for this flow
+# Admin creates a tenant just for this flow (so only this provider is configured); starter templates
+# otp + welcome are added; the API key is returned once. Already ran this flow? Change the slug (409
+# TENANT_SLUG_TAKEN).
+# @name r2_create_a_tenant_for_this_flow
+POST {{baseUrl}}/v1/admin/tenants
+Content-Type: application/json
+x-admin-key: {{ADMIN_KEY}}
+
+{
+  "name": "Acme Inc.",
+  "slug": "acme-twilio-demo",
+  "settings": { "appName": "Acme" }
+}
+
+### 3 · Add the SMS provider
+# Validated → saved (credentials encrypted) → Redis cache refreshed. from = a Twilio number you own,
+# or set settings.messaging_service_sid instead.
+# @name r3_add_the_sms_provider
+POST {{baseUrl}}/v1/providers
+Content-Type: application/json
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+{
+  "channel": "CHANNEL_SMS",
+  "provider": "twilio",
+  "name": "twilio-main",
+  "priority": 1,
+  "settings": { "from": "+14155550100" },
+  "credentials": { "account_sid": "ACXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX", "auth_token": "<TWILIO_AUTH_TOKEN>" },
+  "fromAddresses": { "twilio-demo": "+14155550100" },
+  "limits": { "rateMax": 10, "rateDurationMs": 1000 }
+}
+
+### 4 · Check the From (sender) list
+# "twilio-demo" must be listed with this provider.
+# Query params: channel = CHANNEL_SMS
+# @name r4_check_the_from_sender_list
+GET {{baseUrl}}/v1/from-addresses?channel=CHANNEL_SMS
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+### 5 · Send OTP with the starter "otp" template
+# High priority (queue priority 1): goes before normal and bulk messages. Recipient must be E.164 (+
+# and country code).
+# @name r5_send_otp_with_the_starter_otp_templat
+POST {{baseUrl}}/v1/notifications
+Content-Type: application/json
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+{
+  "channel": "CHANNEL_SMS",
+  "recipient": "+919876543210",
+  "template": "otp",
+  "data": {
+    "code": "482913",
+    "expiresInMinutes": 5
+  },
+  "priority": "PRIORITY_HIGH",
+  "from": "twilio-demo",
+  "idempotencyKey": "otp-user-42-twilio-demo-1"
+}
+
+### 6 · Check delivery
+# status SENT; providerName = this provider; sentFrom = the sender id / number used.
+# Path params: notification id = <NOTIFICATION_ID>  (notification.id from a send)
+# @name r6_check_delivery
+GET {{baseUrl}}/v1/notifications/{{r5_send_otp_with_the_starter_otp_templat.response.body.$.notification.id}}
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+### 7 · Create your own SMS template
+# Version 1, active.
+# @name r7_create_your_own_sms_template
+POST {{baseUrl}}/v1/templates
+Content-Type: application/json
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+{
+  "channel": "CHANNEL_SMS",
+  "name": "order-shipped",
+  "content": { "body": "{{appName}}: order {{orderId}} has shipped. Track: {{trackingUrl}}" }
+}
+
+### 8 · Send with your template
+# Normal priority.
+# @name r8_send_with_your_template
+POST {{baseUrl}}/v1/notifications
+Content-Type: application/json
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+{
+  "channel": "CHANNEL_SMS",
+  "recipient": "+919876543210",
+  "template": "order-shipped",
+  "data": {
+    "orderId": "ORD-1001",
+    "trackingUrl": "https://acme.com/t/ORD-1001"
+  },
+  "from": "twilio-demo"
+}
+
+### 9 · Check delivery
+# As step 6.
+# Path params: notification id = <NOTIFICATION_ID>  (notification.id from a send)
+# @name r9_check_delivery
+GET {{baseUrl}}/v1/notifications/{{r8_send_with_your_template.response.body.$.notification.id}}
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}

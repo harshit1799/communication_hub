@@ -18,7 +18,8 @@ service NotificationService {
       body: "notification"
     };
   }
-  // Up to 500 notifications in one call; low priority by default (campaigns).
+  // Up to 500 notifications in one call (after expanding recipients /
+  // user_ids); low priority by default (campaigns).
   rpc SendBulkNotifications(SendBulkNotificationsRequest) returns (SendBulkNotificationsResponse) {
     option (google.api.http) = {
       post: "/v1/notifications/bulk"
@@ -111,6 +112,14 @@ message NotificationInput {
   //                       preferring providers that list it (must be verified with the vendor)
   //   unset               each provider's default settings.from
   optional string from = 15;
+  // SendBulkNotifications only: the same content to several targets. Each
+  // entry becomes its own notification (duplicates dropped), with
+  // idempotency_key extended per target. recipient may also be a
+  // comma-separated list there.
+  //   recipients  email addresses / E.164 numbers / push tokens
+  //   user_ids    push (every device of each user) or in-app inboxes
+  repeated string recipients = 16;
+  repeated string user_ids = 17;
 }
 
 message SendNotificationRequest {

@@ -1,0 +1,883 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Communication Hub: every API in the order you use it, with sample bodies.
+
+  Source of truth: proto/communication_hub/v1/*.proto (each rpc's google.api.http option
+  gives the REST verb and path). Prose version with more detail: docs/API_GUIDE.md.
+
+  Conventions
+    rest     the REST path served by the HTTP gateway (BASE = http://localhost:3000/api)
+    grpc     the same call on localhost:50051 (package communication_hub.v1)
+    auth     admin = header x-admin-key, tenant = header x-api-key
+    status   the HTTP status on success
+    Bodies are JSON in CDATA. Placeholders look like <TENANT_ID>.
+-->
+<apiDocumentation name="Communication Hub" version="v1">
+
+  <endpoints>
+    <endpoint name="REST API" url="http://localhost:3000/api/v1"/>
+    <endpoint name="Swagger UI" url="http://localhost:3000/docs"/>
+    <endpoint name="OpenAPI JSON" url="http://localhost:3000/docs/openapi.json"/>
+    <endpoint name="gRPC" url="localhost:50051"/>
+    <endpoint name="Ops (health, metrics)" url="http://localhost:9464"/>
+  </endpoints>
+
+  <headers>
+    <header name="Content-Type" required="for bodies">application/json</header>
+    <header name="x-admin-key" required="admin APIs">ADMIN_API_KEY from .env / Secrets Manager</header>
+    <header name="x-api-key" required="tenant APIs">The tenant key (chk_...) returned when the tenant is created</header>
+    <header name="x-request-id" required="no">Your trace id; echoed back and written to every log line, including the worker's</header>
+    <header name="language" required="no">Language of error messages</header>
+  </headers>
+
+  <roles>
+    <role name="Platform admin" auth="x-admin-key">Creates, updates and deactivates tenants; issues and revokes their API keys.</role>
+    <role name="Tenant" auth="x-api-key">Manages its own providers, templates and devices; sends notifications; reads notifications and inboxes. Never sees another tenant's data.</role>
+  </roles>
+
+  <!-- ===================================================================== -->
+  <!-- How one request travels through the system                            -->
+  <!-- ===================================================================== -->
+  <requestFlow>
+    <step order="1">Client calls REST (Swagger, curl) on :3000 or gRPC directly on :50051.</step>
+    <step order="2">REST only: the HTTP gateway matches the path and verb (from the proto's google.api.http), builds the proto message from path params, query and JSON body, and forwards headers as gRPC metadata.</step>
+    <step order="3">gRPC server: RpcContextGuard opens the request context (request id), the auth guard checks x-admin-key or x-api-key and loads the tenant.</step>
+    <step order="4">The @GrpcMethod controller validates the request and calls its service (DB, Redis, queue).</step>
+    <step order="5">The reply goes back as a proto message; the gateway turns it into JSON and gRPC errors into HTTP status codes.</step>
+  </requestFlow>
+
+  <deliveryFlow>
+    <step order="1">POST /notifications: the hub validates, resolves the template version and the From, stores the notification (recipient and data encrypted) with status QUEUED, and enqueues a BullMQ job on notifications-&lt;channel&gt;. Answers 202 with the queue state.</step>
+    <step order="2">A worker picks the job, loads the tenant's providers for the channel from Redis (providers:&lt;tenant&gt;:&lt;channel&gt;), falling back to the DB and then to the platform default from .env.</step>
+    <step order="3">Providers are tried in priority order. Each provider's rate and concurrency limits are checked in Redis; a provider at its limit is skipped for the next one; if all are at their limit the job is delayed without using an attempt.</step>
+    <step order="4">Success: status SENT, with provider, providerName, sentFrom and providerMessageId. Temporary error: the next provider (failover), then RETRYING with backoff. Permanent error or attempts used up: FAILED.</step>
+    <step order="5">Every provider call is stored as an attempt (provider, providerName, sender, success, error, durationMs). Read them with GET /notifications/{id}.</step>
+    <statuses><![CDATA[
+QUEUED ──► PROCESSING ──► SENT
+              ├─► RETRYING ──► PROCESSING ──► ...   (temporary error, attempts left)
+              └─► FAILED                            (permanent error, or attempts used up)
+QUEUED / RETRYING ──► CANCELLED                     (cancel)
+FAILED ──► QUEUED                                   (retry)
+]]></statuses>
+  </deliveryFlow>
+
+  <!-- ===================================================================== -->
+  <!-- Every provider: what it needs and a sample CreateProvider body        -->
+  <!-- ===================================================================== -->
+  <providers>
+    <note>Add providers with POST /v1/providers (step 2). credentials are encrypted and never returned. settings.from is the default From; fromAddresses adds named Froms (email and SMS only, up to 20, names are 1-50 lowercase letters, digits or dashes). Lower priority is tried first (default 100). A channel with no active provider uses the platform default from .env.</note>
+
+    <provider kind="smtp" channel="CHANNEL_EMAIL">
+      <settings>
+        <field name="host" required="true">SMTP host</field>
+        <field name="port" required="false">Default 587</field>
+        <field name="secure" required="false">"true" for port 465, else "false"</field>
+        <field name="from" required="false">Default From, e.g. "Acme &lt;no-reply@acme.com&gt;"</field>
+      </settings>
+      <credentials>
+        <field name="user" required="false">SMTP user</field>
+        <field name="pass" required="false">SMTP password / app password</field>
+      </credentials>
+      <sampleBody><![CDATA[
+{
+  "channel": "CHANNEL_EMAIL",
+  "provider": "smtp",
+  "name": "smtp-main",
+  "priority": 1,
+  "settings": { "host": "smtp.gmail.com", "port": "587", "secure": "false", "from": "Acme <no-reply@acme.com>" },
+  "credentials": { "user": "mailer@acme.com", "pass": "<SMTP_PASSWORD>" },
+  "fromAddresses": {
+    "support": "Acme Support <support@acme.com>",
+    "billing": "Acme Billing <billing@acme.com>",
+    "alerts": "Acme Alerts <alerts@acme.com>"
+  },
+  "limits": { "rateMax": 20, "rateDurationMs": 1000, "maxConcurrency": 5, "maxAttempts": 3, "backoffMs": 2000 }
+}
+]]></sampleBody>
+    </provider>
+
+    <provider kind="ses" channel="CHANNEL_EMAIL">
+      <settings>
+        <field name="region" required="true">AWS region, e.g. eu-west-1</field>
+        <field name="from" required="false">Default From (verified SES identity)</field>
+      </settings>
+      <credentials>
+        <field name="access_key_id" required="false">Set together with secret_access_key; omit both to use the server's IAM role</field>
+        <field name="secret_access_key" required="false"/>
+      </credentials>
+      <sampleBody><![CDATA[
+{
+  "channel": "CHANNEL_EMAIL",
+  "provider": "ses",
+  "name": "ses-backup",
+  "priority": 2,
+  "settings": { "region": "eu-west-1", "from": "Acme <no-reply@mail.acme.com>" },
+  "credentials": { "access_key_id": "AKIAxxxxxxxx", "secret_access_key": "<SECRET>" },
+  "fromAddresses": { "billing": "Acme Billing <billing@mail.acme.com>" }
+}
+]]></sampleBody>
+    </provider>
+
+    <provider kind="sendgrid" channel="CHANNEL_EMAIL">
+      <settings>
+        <field name="from" required="false">Default From (verified SendGrid sender)</field>
+      </settings>
+      <credentials>
+        <field name="api_key" required="true">SendGrid API key</field>
+      </credentials>
+      <sampleBody><![CDATA[
+{
+  "channel": "CHANNEL_EMAIL",
+  "provider": "sendgrid",
+  "name": "sendgrid",
+  "priority": 3,
+  "settings": { "from": "Acme <no-reply@acme.com>" },
+  "credentials": { "api_key": "SG.xxxxx" }
+}
+]]></sampleBody>
+    </provider>
+
+    <provider kind="twilio" channel="CHANNEL_SMS">
+      <settings>
+        <field name="from" required="false">E.164 number, short code or alphanumeric sender id</field>
+        <field name="messaging_service_sid" required="false">Twilio Messaging Service (instead of or with from)</field>
+      </settings>
+      <credentials>
+        <field name="account_sid" required="true"/>
+        <field name="auth_token" required="true"/>
+      </credentials>
+      <sampleBody><![CDATA[
+{
+  "channel": "CHANNEL_SMS",
+  "provider": "twilio",
+  "name": "twilio-main",
+  "priority": 1,
+  "settings": { "from": "+14155550100" },
+  "credentials": { "account_sid": "ACxxxxxxxx", "auth_token": "<TOKEN>" },
+  "fromAddresses": { "india": "ACMEIN", "otp": "56789" },
+  "limits": { "rateMax": 10, "rateDurationMs": 1000 }
+}
+]]></sampleBody>
+    </provider>
+
+    <provider kind="sns" channel="CHANNEL_SMS">
+      <settings>
+        <field name="region" required="true">AWS region, e.g. ap-south-1</field>
+        <field name="from" required="false">Sender id</field>
+      </settings>
+      <credentials>
+        <field name="access_key_id" required="false">Set together with secret_access_key; omit both to use the IAM role</field>
+        <field name="secret_access_key" required="false"/>
+      </credentials>
+      <sampleBody><![CDATA[
+{
+  "channel": "CHANNEL_SMS",
+  "provider": "sns",
+  "name": "sns-backup",
+  "priority": 2,
+  "settings": { "region": "ap-south-1", "from": "ACMEIN" }
+}
+]]></sampleBody>
+    </provider>
+
+    <provider kind="fcm" channel="CHANNEL_PUSH">
+      <note>Also delivers in-app signals: CHANNEL_IN_APP uses the tenant's push providers. No From.</note>
+      <credentials>
+        <field name="service_account" required="true">The Firebase service account JSON, as a string</field>
+      </credentials>
+      <sampleBody><![CDATA[
+{
+  "channel": "CHANNEL_PUSH",
+  "provider": "fcm",
+  "name": "firebase",
+  "priority": 1,
+  "credentials": {
+    "service_account": "{\"type\":\"service_account\",\"project_id\":\"acme-app\",\"private_key_id\":\"...\",\"private_key\":\"-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n\",\"client_email\":\"firebase-adminsdk@acme-app.iam.gserviceaccount.com\"}"
+  }
+}
+]]></sampleBody>
+    </provider>
+
+    <provider kind="console" channel="any">
+      <note>Development only: logs the message instead of sending it.</note>
+      <settings>
+        <field name="from" required="false"/>
+      </settings>
+      <sampleBody><![CDATA[
+{
+  "channel": "CHANNEL_EMAIL",
+  "provider": "console",
+  "name": "dev-console",
+  "settings": { "from": "Dev <dev@localhost.test>" },
+  "fromAddresses": { "billing": "Dev Billing <billing@localhost.test>" }
+}
+]]></sampleBody>
+    </provider>
+
+    <limits>
+      <field name="rateMax" range="1-100000">Sends per window, across all workers (set with rateDurationMs)</field>
+      <field name="rateDurationMs" range="100-3600000">Window length in ms</field>
+      <field name="maxConcurrency" range="1-1000">Sends in flight at once, across all workers</field>
+      <field name="maxAttempts" range="1-20">Delivery attempts per message (1 = no retry); default QUEUE_ATTEMPTS</field>
+      <field name="backoffMs" range="100-3600000">First retry delay, doubles each attempt; default QUEUE_BACKOFF_MS</field>
+    </limits>
+
+    <fromSelection>
+      <rule send="no from">All active providers of the channel, each with its settings.from (email without one: MAIL_FROM)</rule>
+      <rule send="from = a name, e.g. billing">Only providers that have that name, each with its own address for it</rule>
+      <rule send="from = an address">Providers listing that address, or all if none does; sent as given</rule>
+      <rule send="from = unknown name">Rejected: 404 FROM_NOT_FOUND</rule>
+    </fromSelection>
+  </providers>
+
+  <!-- ===================================================================== -->
+  <!-- Every API, in the order of the flow                                   -->
+  <!-- ===================================================================== -->
+  <flow>
+
+    <!-- ================================================================= -->
+    <step order="0" name="Check the service" actor="anyone">
+      <api id="0.1" name="Liveness" method="GET" rest="http://localhost:9464/health/live" auth="none" status="200">
+        <description>Process is up (ops server, not the gateway).</description>
+        <response><![CDATA[{ "status": "ok", "uptime": 1234.5 }]]></response>
+      </api>
+      <api id="0.2" name="Readiness" method="GET" rest="http://localhost:9464/health/ready" auth="none" status="200">
+        <description>Database and Redis reachable. 503 when not ready.</description>
+        <response><![CDATA[{ "ready": true, "database": "up", "redis": "up", "...": "queue depth" }]]></response>
+      </api>
+      <api id="0.3" name="Prometheus metrics" method="GET" rest="http://localhost:9464/metrics" auth="none" status="200">
+        <description>Prometheus text format, scraped by Prometheus.</description>
+      </api>
+      <api id="0.4" name="gRPC health check" method="gRPC" grpc="grpc.health.v1.Health/Check" auth="none">
+        <description>Standard gRPC health protocol (no REST route).</description>
+        <requestBody><![CDATA[{ "service": "" }]]></requestBody>
+        <response><![CDATA[{ "status": "SERVING" }]]></response>
+      </api>
+    </step>
+
+    <!-- ================================================================= -->
+    <step order="1" name="Create the tenant and its API key" actor="Platform admin">
+      <api id="1.1" name="Create tenant" method="POST" rest="/v1/admin/tenants" grpc="TenantAdminService/CreateTenant" auth="admin" status="201">
+        <description>Creates the tenant, its starter templates (otp, welcome) and a first API key. apiKey.key is shown only once.</description>
+        <requestBody><![CDATA[
+{
+  "name": "Acme Inc.",
+  "slug": "acme",
+  "settings": { "appName": "Acme" }
+}
+]]></requestBody>
+        <response><![CDATA[
+{
+  "tenant": {
+    "id": "<TENANT_ID>", "name": "Acme Inc.", "slug": "acme", "active": true,
+    "settings": { "appName": "Acme" },
+    "createdAt": "2026-10-27T06:37:33.601Z", "updatedAt": "2026-10-27T06:37:33.600Z"
+  },
+  "apiKey": {
+    "apiKey": { "id": "<KEY_ID>", "name": "default", "prefix": "chk_1zzfMyTm", "createdAt": "2026-10-27T06:37:33.630Z" },
+    "key": "chk_1zzfMyTm-EGz5S6_VEShKu_..."
+  }
+}
+]]></response>
+      </api>
+
+      <api id="1.2" name="List tenants" method="GET" rest="/v1/admin/tenants" grpc="TenantAdminService/ListTenants" auth="admin" status="200">
+        <requestBody>none</requestBody>
+        <response><![CDATA[{ "tenants": [ { "id": "<TENANT_ID>", "name": "Acme Inc.", "slug": "acme", "active": true, "...": "..." } ] }]]></response>
+      </api>
+
+      <api id="1.3" name="Get tenant" method="GET" rest="/v1/admin/tenants/{id}" grpc="TenantAdminService/GetTenant" auth="admin" status="200">
+        <pathParams><param name="id">Tenant id</param></pathParams>
+        <requestBody>none</requestBody>
+      </api>
+
+      <api id="1.4" name="Update tenant (rename, rebrand, deactivate)" method="PATCH" rest="/v1/admin/tenants/{id}" grpc="TenantAdminService/UpdateTenant" auth="admin" status="200">
+        <description>Only given fields change; settings are merged. active=false makes every key of the tenant answer 403 TENANT_INACTIVE.</description>
+        <pathParams><param name="id">Tenant id</param></pathParams>
+        <requestBody><![CDATA[
+{
+  "name": "Acme Corporation",
+  "settings": { "appName": "Acme Corp" },
+  "active": true
+}
+]]></requestBody>
+      </api>
+
+      <api id="1.5" name="Create another API key" method="POST" rest="/v1/admin/tenants/{tenant_id}/api-keys" grpc="TenantAdminService/CreateApiKey" auth="admin" status="201">
+        <description>For rotation: create the new key, deploy it, revoke the old one. key is shown only once.</description>
+        <pathParams><param name="tenant_id">Tenant id</param></pathParams>
+        <requestBody><![CDATA[
+{
+  "name": "backend-prod",
+  "expiresAt": "2027-12-31T00:00:00Z"
+}
+]]></requestBody>
+        <response><![CDATA[
+{
+  "apiKey": { "id": "<KEY_ID>", "name": "backend-prod", "prefix": "chk_Ab12Cd34", "expiresAt": "2027-12-31T00:00:00Z", "createdAt": "..." },
+  "key": "chk_Ab12Cd34-..."
+}
+]]></response>
+      </api>
+
+      <api id="1.6" name="List API keys" method="GET" rest="/v1/admin/tenants/{id}/api-keys" grpc="TenantAdminService/ListApiKeys" auth="admin" status="200">
+        <description>Never returns the key itself, only its prefix.</description>
+        <pathParams><param name="id">Tenant id</param></pathParams>
+        <requestBody>none</requestBody>
+      </api>
+
+      <api id="1.7" name="Revoke API key" method="DELETE" rest="/v1/admin/tenants/{tenant_id}/api-keys/{key_id}" grpc="TenantAdminService/RevokeApiKey" auth="admin" status="204">
+        <description>Effective immediately.</description>
+        <pathParams>
+          <param name="tenant_id">Tenant id</param>
+          <param name="key_id">API key id</param>
+        </pathParams>
+        <requestBody>none</requestBody>
+      </api>
+    </step>
+
+    <!-- ================================================================= -->
+    <step order="2" name="Add providers and From addresses" actor="Tenant">
+      <api id="2.1" name="Create provider" method="POST" rest="/v1/providers" grpc="ProviderService/CreateProvider" auth="tenant" status="201">
+        <description>One vendor account for one channel. See the providers section above for every vendor's body. Invalid configs answer 400 PROVIDER_CONFIG_INVALID listing every problem.</description>
+        <requestBody><![CDATA[
+{
+  "channel": "CHANNEL_EMAIL",
+  "provider": "smtp",
+  "name": "smtp-main",
+  "priority": 1,
+  "settings": { "host": "smtp.acme.com", "port": "587", "secure": "false", "from": "Acme <no-reply@acme.com>" },
+  "credentials": { "user": "mailer@acme.com", "pass": "<SMTP_PASSWORD>" },
+  "fromAddresses": {
+    "support": "Acme Support <support@acme.com>",
+    "billing": "Acme Billing <billing@acme.com>"
+  },
+  "limits": { "rateMax": 20, "rateDurationMs": 1000, "maxAttempts": 3, "backoffMs": 2000 }
+}
+]]></requestBody>
+        <response><![CDATA[
+{
+  "id": "<PROVIDER_ID>", "channel": "CHANNEL_EMAIL", "provider": "smtp", "name": "smtp-main",
+  "priority": 1, "active": true,
+  "settings": { "from": "Acme <no-reply@acme.com>", "host": "smtp.acme.com", "port": "587", "secure": "false" },
+  "fromAddresses": { "billing": "Acme Billing <billing@acme.com>", "support": "Acme Support <support@acme.com>" },
+  "credentialKeys": ["pass", "user"],
+  "limits": { "rateMax": 20, "rateDurationMs": 1000, "maxAttempts": 3, "backoffMs": 2000 },
+  "createdAt": "...", "updatedAt": "..."
+}
+]]></response>
+      </api>
+
+      <api id="2.2" name="List providers" method="GET" rest="/v1/providers" grpc="ProviderService/ListProviders" auth="tenant" status="200">
+        <description>In failover order per channel.</description>
+        <queryParams><param name="channel" required="false">e.g. CHANNEL_EMAIL; omit for all</param></queryParams>
+        <example>GET /api/v1/providers?channel=CHANNEL_EMAIL</example>
+        <requestBody>none</requestBody>
+      </api>
+
+      <api id="2.3" name="Get provider" method="GET" rest="/v1/providers/{id}" grpc="ProviderService/GetProvider" auth="tenant" status="200">
+        <pathParams><param name="id">Provider id</param></pathParams>
+        <requestBody>none</requestBody>
+      </api>
+
+      <api id="2.4" name="Update provider" method="PATCH" rest="/v1/providers/{id}" grpc="ProviderService/UpdateProvider" auth="tenant" status="200">
+        <description>settings and fromAddresses are merged ("" removes a key or name); credentials are replaced as a whole; limits fields replace the stored ones (0 removes a limit). Applies to the next message (Redis cache is refreshed).</description>
+        <pathParams><param name="id">Provider id</param></pathParams>
+        <requestBody><![CDATA[
+{
+  "priority": 5,
+  "active": true,
+  "settings": { "from": "Acme <hello@acme.com>" },
+  "fromAddresses": { "news": "Acme News <news@acme.com>", "alerts": "" },
+  "credentials": { "user": "mailer@acme.com", "pass": "<NEW_PASSWORD>" },
+  "limits": { "maxConcurrency": 0, "maxAttempts": 5 }
+}
+]]></requestBody>
+        <examples>
+          <example name="Disable">{ "active": false }</example>
+          <example name="Change priority">{ "priority": 5 }</example>
+          <example name="Remove rate limit">{ "limits": { "rateMax": 0, "rateDurationMs": 0 } }</example>
+        </examples>
+      </api>
+
+      <api id="2.5" name="Delete provider" method="DELETE" rest="/v1/providers/{id}" grpc="ProviderService/DeleteProvider" auth="tenant" status="204">
+        <pathParams><param name="id">Provider id</param></pathParams>
+        <requestBody>none</requestBody>
+      </api>
+
+      <api id="2.6" name="List From addresses" method="GET" rest="/v1/from-addresses" grpc="ProviderService/ListFromAddresses" auth="tenant" status="200">
+        <description>Every From the tenant can send with, in failover order, with the provider that owns it. active=false marks addresses of disabled providers.</description>
+        <queryParams><param name="channel" required="false">CHANNEL_EMAIL or CHANNEL_SMS; omit for both</param></queryParams>
+        <example>GET /api/v1/from-addresses?channel=CHANNEL_EMAIL</example>
+        <requestBody>none</requestBody>
+        <response><![CDATA[
+{
+  "fromAddresses": [
+    { "address": "Acme <no-reply@acme.com>", "isDefault": true, "channel": "CHANNEL_EMAIL",
+      "providerId": "<PROVIDER_ID>", "providerName": "smtp-main", "provider": "smtp", "active": true },
+    { "name": "billing", "address": "Acme Billing <billing@acme.com>", "isDefault": false, "channel": "CHANNEL_EMAIL",
+      "providerId": "<PROVIDER_ID>", "providerName": "smtp-main", "provider": "smtp", "active": true }
+  ]
+}
+]]></response>
+      </api>
+    </step>
+
+    <!-- ================================================================= -->
+    <step order="3" name="Templates" actor="Tenant">
+      <note>Handlebars ({{name}}, {{#if x}}...{{/if}}); {{appName}} and {{year}} are always available. Email needs subject + html and/or body; SMS needs body; push / in-app need body (subject = title).</note>
+
+      <api id="3.1" name="Create template" method="POST" rest="/v1/templates" grpc="TemplateService/CreateTemplate" auth="tenant" status="201">
+        <description>Becomes version 1, active. name: lowercase letters, digits and dashes.</description>
+        <requestBody><![CDATA[
+{
+  "channel": "CHANNEL_EMAIL",
+  "name": "invoice-ready",
+  "description": "Invoice notification",
+  "content": {
+    "subject": "Invoice {{invoiceNo}} from {{appName}}",
+    "html": "<p>Hi {{name}}, your invoice <b>{{invoiceNo}}</b> of {{amount}} is ready.</p>",
+    "body": "Hi {{name}}, your invoice {{invoiceNo}} of {{amount}} is ready."
+  }
+}
+]]></requestBody>
+        <response><![CDATA[
+{ "id": "<TEMPLATE_ID>", "channel": "CHANNEL_EMAIL", "name": "invoice-ready", "description": "Invoice notification",
+  "activeVersion": 1, "latestVersion": 1, "archived": false, "createdAt": "...", "updatedAt": "..." }
+]]></response>
+        <examples>
+          <example name="SMS template"><![CDATA[{ "channel": "CHANNEL_SMS", "name": "order-otp", "content": { "body": "{{appName}}: your code is {{code}}" } }]]></example>
+          <example name="Push template"><![CDATA[{ "channel": "CHANNEL_PUSH", "name": "order-shipped", "content": { "subject": "Order shipped", "body": "Order {{orderId}} is on its way" } }]]></example>
+        </examples>
+      </api>
+
+      <api id="3.2" name="List templates" method="GET" rest="/v1/templates" grpc="TemplateService/ListTemplates" auth="tenant" status="200">
+        <queryParams>
+          <param name="channel" required="false">e.g. CHANNEL_EMAIL</param>
+          <param name="include_archived" required="false">true / false</param>
+          <param name="page.limit" required="false">1-100, default 20</param>
+          <param name="page.cursor" required="false">page.nextCursor from the previous page</param>
+        </queryParams>
+        <example>GET /api/v1/templates?channel=CHANNEL_EMAIL&amp;page.limit=20</example>
+        <requestBody>none</requestBody>
+      </api>
+
+      <api id="3.3" name="Get template" method="GET" rest="/v1/templates/{id}" grpc="TemplateService/GetTemplate" auth="tenant" status="200">
+        <pathParams><param name="id">Template id</param></pathParams>
+        <requestBody>none</requestBody>
+      </api>
+
+      <api id="3.4" name="Publish a new version" method="POST" rest="/v1/templates/{template_id}/versions" grpc="TemplateService/CreateTemplateVersion" auth="tenant" status="201">
+        <description>activate=false stages the version without using it.</description>
+        <pathParams><param name="template_id">Template id</param></pathParams>
+        <requestBody><![CDATA[
+{
+  "content": {
+    "subject": "Your {{appName}} invoice {{invoiceNo}}",
+    "html": "<p>Hello {{name}}, invoice <b>{{invoiceNo}}</b> ({{amount}}) is ready.</p>"
+  },
+  "activate": true
+}
+]]></requestBody>
+        <response><![CDATA[
+{ "templateId": "<TEMPLATE_ID>", "version": 2, "content": { "subject": "...", "html": "..." }, "active": true, "createdAt": "..." }
+]]></response>
+      </api>
+
+      <api id="3.5" name="List versions" method="GET" rest="/v1/templates/{id}/versions" grpc="TemplateService/ListTemplateVersions" auth="tenant" status="200">
+        <description>Newest first, with the active flag.</description>
+        <pathParams><param name="id">Template id</param></pathParams>
+        <requestBody>none</requestBody>
+      </api>
+
+      <api id="3.6" name="Activate a version (publish / roll back)" method="POST" rest="/v1/templates/{template_id}/versions/{version}/activate" grpc="TemplateService/ActivateTemplateVersion" auth="tenant" status="200">
+        <pathParams>
+          <param name="template_id">Template id</param>
+          <param name="version">Version number, e.g. 1</param>
+        </pathParams>
+        <requestBody>none</requestBody>
+      </api>
+
+      <api id="3.7" name="Preview" method="POST" rest="/v1/templates/{template_id}/preview" grpc="TemplateService/PreviewTemplate" auth="tenant" status="200">
+        <description>Renders with sample data; nothing is sent. version unset = the active one.</description>
+        <pathParams><param name="template_id">Template id</param></pathParams>
+        <requestBody><![CDATA[
+{
+  "version": 2,
+  "data": { "name": "Jane", "invoiceNo": "INV-1042", "amount": "$120" }
+}
+]]></requestBody>
+        <response><![CDATA[
+{ "subject": "Your Acme invoice INV-1042",
+  "html": "<p>Hello Jane, invoice <b>INV-1042</b> ($120) is ready.</p>" }
+]]></response>
+      </api>
+
+      <api id="3.8" name="Archive" method="POST" rest="/v1/templates/{id}/archive" grpc="TemplateService/ArchiveTemplate" auth="tenant" status="200">
+        <description>No new sends with it (409 TEMPLATE_ARCHIVED); already queued ones still go out.</description>
+        <pathParams><param name="id">Template id</param></pathParams>
+        <requestBody>none</requestBody>
+      </api>
+    </step>
+
+    <!-- ================================================================= -->
+    <step order="4" name="Register devices (push and in-app)" actor="Tenant backend">
+      <api id="4.1" name="Register device" method="POST" rest="/v1/devices" grpc="DeviceService/RegisterDevice" auth="tenant" status="200">
+        <description>Store the user's FCM token, e.g. at login. Re-registering refreshes it. platform: DEVICE_PLATFORM_ANDROID, DEVICE_PLATFORM_IOS, DEVICE_PLATFORM_WEB.</description>
+        <requestBody><![CDATA[
+{
+  "userId": "user-42",
+  "token": "<FCM registration token>",
+  "platform": "DEVICE_PLATFORM_ANDROID"
+}
+]]></requestBody>
+        <response><![CDATA[
+{ "id": "<DEVICE_ID>", "userId": "user-42", "token": "<FCM registration token>",
+  "platform": "DEVICE_PLATFORM_ANDROID", "active": true, "lastSeenAt": "...", "createdAt": "..." }
+]]></response>
+      </api>
+
+      <api id="4.2" name="List a user's devices" method="GET" rest="/v1/devices" grpc="DeviceService/ListDevices" auth="tenant" status="200">
+        <queryParams><param name="user_id" required="true">Your user id</param></queryParams>
+        <example>GET /api/v1/devices?user_id=user-42</example>
+        <requestBody>none</requestBody>
+      </api>
+
+      <api id="4.3" name="Unregister device" method="DELETE" rest="/v1/devices/{token}" grpc="DeviceService/UnregisterDevice" auth="tenant" status="204">
+        <description>E.g. at logout. Tokens FCM reports as dead are deactivated automatically.</description>
+        <pathParams><param name="token">The FCM token (URL-encoded)</param></pathParams>
+        <requestBody>none</requestBody>
+      </api>
+    </step>
+
+    <!-- ================================================================= -->
+    <step order="5" name="Send notifications" actor="Tenant backend">
+      <note>The REST body of POST /v1/notifications is the notification itself (proto: body "notification"). Over gRPC, wrap it: { "notification": { ... } }. Answers 202: stored and queued, delivered in the background.</note>
+
+      <api id="5.1" name="Send (email with template)" method="POST" rest="/v1/notifications" grpc="NotificationService/SendNotification" auth="tenant" status="202">
+        <requestBody><![CDATA[
+{
+  "channel": "CHANNEL_EMAIL",
+  "recipient": "jane@example.com",
+  "template": "invoice-ready",
+  "data": { "name": "Jane", "invoiceNo": "INV-1042", "amount": "$120" },
+  "from": "billing",
+  "idempotencyKey": "invoice-INV-1042"
+}
+]]></requestBody>
+        <response><![CDATA[
+{
+  "notification": {
+    "id": "<NOTIFICATION_ID>", "channel": "CHANNEL_EMAIL", "recipient": "jane@example.com",
+    "template": "invoice-ready", "templateVersion": 2,
+    "data": { "name": "Jane", "invoiceNo": "INV-1042", "amount": "$120" },
+    "from": "billing",
+    "status": "NOTIFICATION_STATUS_QUEUED", "priority": "PRIORITY_NORMAL",
+    "idempotencyKey": "invoice-INV-1042", "attempts": 0, "metadata": {}, "alsoPush": false,
+    "createdAt": "...", "updatedAt": "..."
+  },
+  "replayed": false,
+  "attempts": [],
+  "queue": {
+    "queue": "notifications-email", "jobId": "<NOTIFICATION_ID>", "state": "waiting",
+    "priority": 5, "attemptsMade": 0, "maxAttempts": 3
+  }
+}
+]]></response>
+        <queueStates>waiting, prioritized, delayed (scheduled / retry backoff / provider at its limit), active, completed, failed, not_enqueued (sweeper re-enqueues within ~3 min), removed (pruned after an hour)</queueStates>
+      </api>
+
+      <api id="5.2" name="Send (email without template)" method="POST" rest="/v1/notifications" grpc="NotificationService/SendNotification" auth="tenant" status="202">
+        <requestBody><![CDATA[
+{
+  "channel": "CHANNEL_EMAIL",
+  "recipient": "jane@example.com",
+  "subject": "Your receipt",
+  "body": "Thanks for your payment, {{name}}.",
+  "data": { "name": "Jane" },
+  "from": "Acme Billing <billing@acme.com>"
+}
+]]></requestBody>
+      </api>
+
+      <api id="5.3" name="Send (SMS OTP, high priority)" method="POST" rest="/v1/notifications" grpc="NotificationService/SendNotification" auth="tenant" status="202">
+        <description>recipient must be E.164. from "india" sends as ACMEIN (a named From on the SMS provider).</description>
+        <requestBody><![CDATA[
+{
+  "channel": "CHANNEL_SMS",
+  "recipient": "+919876543210",
+  "template": "otp",
+  "data": { "code": "482913", "expiresInMinutes": 5 },
+  "priority": "PRIORITY_HIGH",
+  "from": "india",
+  "idempotencyKey": "otp-user-42-1730000000"
+}
+]]></requestBody>
+      </api>
+
+      <api id="5.4" name="Send (push to all of a user's devices)" method="POST" rest="/v1/notifications" grpc="NotificationService/SendNotification" auth="tenant" status="202">
+        <description>subject is the title; metadata reaches the app as the FCM data payload (plus notificationId). Use "recipient": "&lt;token&gt;" instead of userId for one device.</description>
+        <requestBody><![CDATA[
+{
+  "channel": "CHANNEL_PUSH",
+  "userId": "user-42",
+  "subject": "Order shipped",
+  "body": "Order {{orderId}} is on its way",
+  "data": { "orderId": "ORD-77" },
+  "metadata": { "deeplink": "app://orders/77" }
+}
+]]></requestBody>
+      </api>
+
+      <api id="5.5" name="Send (in-app inbox + push)" method="POST" rest="/v1/notifications" grpc="NotificationService/SendNotification" auth="tenant" status="202">
+        <description>Stored in the user's inbox (step 7). Without alsoPush the devices get a silent data message (data.type = "inbox") so the app refreshes; with alsoPush they also show a visible push.</description>
+        <requestBody><![CDATA[
+{
+  "channel": "CHANNEL_IN_APP",
+  "userId": "user-42",
+  "subject": "Invoice ready",
+  "body": "Invoice {{invoiceNo}} is ready",
+  "data": { "invoiceNo": "INV-1042" },
+  "metadata": { "deeplink": "app://invoices/1042" },
+  "alsoPush": true
+}
+]]></requestBody>
+      </api>
+
+      <api id="5.6" name="Send (scheduled)" method="POST" rest="/v1/notifications" grpc="NotificationService/SendNotification" auth="tenant" status="202">
+        <description>scheduledAt must be in the future and at most 30 days ahead (change the date when you demo). queue.state is "delayed" with runAt.</description>
+        <requestBody><![CDATA[
+{
+  "channel": "CHANNEL_EMAIL",
+  "recipient": "jane@example.com",
+  "template": "welcome",
+  "data": { "name": "Jane" },
+  "scheduledAt": "2026-11-20T09:00:00Z"
+}
+]]></requestBody>
+        <response><![CDATA[
+"queue": { "queue": "notifications-email", "jobId": "<NOTIFICATION_ID>", "state": "delayed",
+           "priority": 5, "attemptsMade": 0, "maxAttempts": 5, "runAt": "2026-11-20T09:00:00.000Z" }
+]]></response>
+      </api>
+
+      <api id="5.7" name="Send bulk (campaigns, up to 500)" method="POST" rest="/v1/notifications/bulk" grpc="NotificationService/SendBulkNotifications" auth="tenant" status="202">
+        <description>Defaults to PRIORITY_LOW so single sends (OTPs) are never delayed. Response: accepted, replayed, notifications and queues in request order.</description>
+        <requestBody><![CDATA[
+{
+  "notifications": [
+    { "channel": "CHANNEL_SMS", "recipient": "+14155550101", "body": "Sale starts now!" },
+    { "channel": "CHANNEL_EMAIL", "recipient": "bob@example.com", "subject": "Sale", "body": "Sale starts now!", "from": "support" },
+    { "channel": "CHANNEL_PUSH", "userId": "user-42", "subject": "Sale", "body": "Sale starts now!" }
+  ]
+}
+]]></requestBody>
+      </api>
+
+      <api id="5.8" name="Send bulk: same message to many recipients" method="POST" rest="/v1/notifications/bulk" grpc="NotificationService/SendBulkNotifications" auth="tenant" status="202">
+        <description>One item, many targets. Email / SMS / push tokens: "recipients": [...] or a comma-separated "recipient". Push / in-app users: "userIds": [...]. Each target becomes its own notification (own id, status, retry), in order, duplicates dropped; accepted = number of targets. idempotencyKey gets a per-recipient suffix ("key:&lt;hash&gt;"), so repeating the request replays instead of sending twice. At most 500 notifications after expanding. Several recipients and several userIds in one item is a VALIDATION_ERROR; recipients / userIds on POST /v1/notifications (single send) is a VALIDATION_ERROR.</description>
+        <requestBody><![CDATA[
+{
+  "notifications": [
+    {
+      "channel": "CHANNEL_EMAIL",
+      "recipients": ["jane@example.com", "bob@example.com"],
+      "template": "invoice-ready",
+      "data": { "name": "Jane", "invoiceNo": "INV-1042", "amount": "$120" },
+      "from": "billing",
+      "idempotencyKey": "invoice-ready-INV-1042"
+    },
+    {
+      "channel": "CHANNEL_SMS",
+      "recipient": "+919876543210, +919876543211",
+      "template": "otp",
+      "data": { "code": "482913", "expiresInMinutes": 5 },
+      "from": "india"
+    },
+    {
+      "channel": "CHANNEL_PUSH",
+      "userIds": ["user-42", "user-43"],
+      "subject": "Sale",
+      "body": "Sale starts now!"
+    }
+  ]
+}
+]]></requestBody>
+        <response><![CDATA[
+{ "accepted": 6, "replayed": 0,
+  "notifications": [ { "recipient": "jane@example.com", ... }, { "recipient": "bob@example.com", ... },
+                     { "recipient": "+919876543210", ... }, { "recipient": "+919876543211", ... },
+                     { "userId": "user-42", ... }, { "userId": "user-43", ... } ],
+  "queues": [ ...one per notification, same order ] }
+]]></response>
+      </api>
+
+      <sendFields>
+        <field name="channel" channels="all">CHANNEL_EMAIL, CHANNEL_SMS, CHANNEL_PUSH, CHANNEL_IN_APP</field>
+        <field name="recipient" channels="email, sms, push">Email address, E.164 number or device token</field>
+        <field name="userId" channels="push, in-app">All the user's devices (push) / the user's inbox (in-app, required)</field>
+        <field name="template" channels="all">Template name; its active version is pinned on the notification</field>
+        <field name="templateVersion" channels="all">A specific version instead of the active one</field>
+        <field name="subject" channels="email, push, in-app">Required for email without a template; overrides the template subject</field>
+        <field name="body" channels="all">Required without a template</field>
+        <field name="data" channels="all">Values for {{placeholders}} (stored encrypted)</field>
+        <field name="metadata" channels="all">String values; push / in-app: delivered to the app</field>
+        <field name="priority" channels="all">PRIORITY_HIGH, PRIORITY_NORMAL (single default), PRIORITY_LOW (bulk default)</field>
+        <field name="scheduledAt" channels="all">ISO time, up to 30 days ahead</field>
+        <field name="idempotencyKey" channels="all">Same key again returns the original (replayed=true); nothing is sent twice. Max 255 characters</field>
+        <field name="from" channels="email, sms">A From name (e.g. "billing") or an address; unset = each provider's default</field>
+        <field name="alsoPush" channels="in-app">Also show a visible push</field>
+        <field name="recipients" channels="email, sms, push">Bulk only: several recipients for the same content (one notification each). recipient may also be comma-separated in bulk</field>
+        <field name="userIds" channels="push, in-app">Bulk only: several users for the same content (one notification each)</field>
+      </sendFields>
+    </step>
+
+    <!-- ================================================================= -->
+    <step order="6" name="Track, retry and cancel" actor="Tenant backend">
+      <api id="6.1" name="Get notification" method="GET" rest="/v1/notifications/{id}" grpc="NotificationService/GetNotification" auth="tenant" status="200">
+        <description>The notification, every provider attempt and the live queue state. sentFrom and providerName say which address and provider delivered it. Several attempts with the same number are a failover chain.</description>
+        <pathParams><param name="id">Notification id</param></pathParams>
+        <requestBody>none</requestBody>
+        <response><![CDATA[
+{
+  "notification": {
+    "id": "<NOTIFICATION_ID>", "channel": "CHANNEL_EMAIL", "recipient": "jane@example.com",
+    "subject": "Your receipt", "body": "Thanks for your payment.",
+    "from": "billing",
+    "sentFrom": "Acme Billing <billing@mail.acme.com>",
+    "providerName": "ses-backup", "provider": "ses", "providerMessageId": "0100018f...",
+    "status": "NOTIFICATION_STATUS_SENT", "attempts": 1, "sentAt": "2026-10-27T06:47:40.236Z"
+  },
+  "attempts": [
+    { "attempt": 1, "provider": "smtp", "providerName": "smtp-main", "providerId": "<SMTP_PROVIDER_ID>",
+      "sender": "Acme Billing <billing@acme.com>", "success": false,
+      "error": "connect ECONNREFUSED", "permanent": false, "durationMs": 3 },
+    { "attempt": 1, "provider": "ses", "providerName": "ses-backup", "providerId": "<SES_PROVIDER_ID>",
+      "sender": "Acme Billing <billing@mail.acme.com>", "success": true,
+      "providerMessageId": "0100018f...", "permanent": false, "durationMs": 140 }
+  ],
+  "queue": { "queue": "notifications-email", "jobId": "<NOTIFICATION_ID>", "state": "completed",
+             "priority": 5, "attemptsMade": 1, "maxAttempts": 5 }
+}
+]]></response>
+      </api>
+
+      <api id="6.2" name="List notifications" method="GET" rest="/v1/notifications" grpc="NotificationService/ListNotifications" auth="tenant" status="200">
+        <description>Newest first, keyset pagination.</description>
+        <queryParams>
+          <param name="status" required="false">e.g. NOTIFICATION_STATUS_FAILED</param>
+          <param name="channel" required="false">e.g. CHANNEL_EMAIL</param>
+          <param name="recipient" required="false">Exact match (looked up by keyed hash; recipients are encrypted)</param>
+          <param name="user_id" required="false">Your user id</param>
+          <param name="page.limit" required="false">1-100, default 20</param>
+          <param name="page.cursor" required="false">page.nextCursor from the previous response</param>
+        </queryParams>
+        <example>GET /api/v1/notifications?status=NOTIFICATION_STATUS_FAILED&amp;channel=CHANNEL_EMAIL&amp;page.limit=20</example>
+        <requestBody>none</requestBody>
+        <response><![CDATA[{ "notifications": [ { "id": "<NOTIFICATION_ID>", "status": "NOTIFICATION_STATUS_FAILED", "...": "..." } ], "page": { "nextCursor": "<CURSOR>" } }]]></response>
+      </api>
+
+      <api id="6.3" name="Retry a failed notification" method="POST" rest="/v1/notifications/{id}/retry" grpc="NotificationService/RetryNotification" auth="tenant" status="200">
+        <description>FAILED → QUEUED. Other states answer 409 NOTIFICATION_NOT_RETRYABLE. Renders with the same template version.</description>
+        <pathParams><param name="id">Notification id</param></pathParams>
+        <requestBody>none</requestBody>
+      </api>
+
+      <api id="6.4" name="Cancel a queued / scheduled notification" method="POST" rest="/v1/notifications/{id}/cancel" grpc="NotificationService/CancelNotification" auth="tenant" status="200">
+        <description>QUEUED / RETRYING → CANCELLED. Other states answer 409 NOTIFICATION_NOT_CANCELLABLE.</description>
+        <pathParams><param name="id">Notification id</param></pathParams>
+        <requestBody>none</requestBody>
+      </api>
+    </step>
+
+    <!-- ================================================================= -->
+    <step order="7" name="In-app inbox" actor="Tenant backend, for the signed-in user">
+      <note>Messages expire after INBOX_RETENTION_DAYS (default 90).</note>
+
+      <api id="7.1" name="List inbox messages" method="GET" rest="/v1/users/{user_id}/inbox" grpc="InboxService/ListInboxMessages" auth="tenant" status="200">
+        <pathParams><param name="user_id">Your user id</param></pathParams>
+        <queryParams>
+          <param name="unread_only" required="false">true / false</param>
+          <param name="page.limit" required="false">1-100, default 20</param>
+          <param name="page.cursor" required="false">page.nextCursor from the previous page</param>
+        </queryParams>
+        <example>GET /api/v1/users/user-42/inbox?unread_only=true&amp;page.limit=20</example>
+        <requestBody>none</requestBody>
+        <response><![CDATA[
+{
+  "messages": [
+    { "id": "<INBOX_MESSAGE_ID>", "userId": "user-42", "notificationId": "<NOTIFICATION_ID>",
+      "title": "Invoice ready", "body": "Invoice INV-1042 is ready",
+      "metadata": { "deeplink": "app://invoices/1042" }, "read": false,
+      "createdAt": "2026-10-26T08:29:22.274Z", "expiresAt": "2027-01-24T08:29:22.273Z" }
+  ],
+  "page": {},
+  "unreadCount": 1
+}
+]]></response>
+      </api>
+
+      <api id="7.2" name="Unread count (badge)" method="GET" rest="/v1/users/{user_id}/inbox/unread-count" grpc="InboxService/GetUnreadCount" auth="tenant" status="200">
+        <pathParams><param name="user_id">Your user id</param></pathParams>
+        <requestBody>none</requestBody>
+        <response><![CDATA[{ "unreadCount": 1 }]]></response>
+      </api>
+
+      <api id="7.3" name="Mark messages read" method="POST" rest="/v1/users/{user_id}/inbox/read" grpc="InboxService/MarkInboxMessagesRead" auth="tenant" status="200">
+        <description>Up to 500 ids. Returns the new unread count.</description>
+        <pathParams><param name="user_id">Your user id</param></pathParams>
+        <requestBody><![CDATA[
+{
+  "ids": ["<INBOX_MESSAGE_ID>"]
+}
+]]></requestBody>
+        <response><![CDATA[{ "unreadCount": 0 }]]></response>
+      </api>
+
+      <api id="7.4" name="Mark all read" method="POST" rest="/v1/users/{user_id}/inbox/read-all" grpc="InboxService/MarkAllInboxMessagesRead" auth="tenant" status="200">
+        <pathParams><param name="user_id">Your user id</param></pathParams>
+        <requestBody>none</requestBody>
+        <response><![CDATA[{ "unreadCount": 0 }]]></response>
+      </api>
+
+      <api id="7.5" name="Delete inbox message" method="DELETE" rest="/v1/users/{user_id}/inbox/{id}" grpc="InboxService/DeleteInboxMessage" auth="tenant" status="200">
+        <description>Returns the new unread count.</description>
+        <pathParams>
+          <param name="user_id">Your user id</param>
+          <param name="id">Inbox message id</param>
+        </pathParams>
+        <requestBody>none</requestBody>
+        <response><![CDATA[{ "unreadCount": 0 }]]></response>
+      </api>
+    </step>
+  </flow>
+
+  <!-- ===================================================================== -->
+  <!-- Errors: same body on every API                                        -->
+  <!-- ===================================================================== -->
+  <errors>
+    <sampleBody><![CDATA[
+{ "code": "INVALID_ARGUMENT", "type": "VALIDATION_ERROR",
+  "message": "Request validation failed: recipient must be an E.164 phone number, e.g. +14155550123",
+  "data": { "errors": ["recipient must be an E.164 phone number, e.g. +14155550123"] } }
+]]></sampleBody>
+    <error http="400" types="VALIDATION_ERROR">Wrong field value; data.errors lists every problem</error>
+    <error http="400" types="TEMPLATE_INVALID, TEMPLATE_RENDER_FAILED, PROVIDER_CONFIG_INVALID">Broken template, placeholder or provider config</error>
+    <error http="401" types="API_KEY_MISSING, API_KEY_INVALID, ADMIN_KEY_INVALID">Missing, wrong, revoked or expired key</error>
+    <error http="403" types="TENANT_INACTIVE">Tenant deactivated by the admin</error>
+    <error http="404" types="NOTIFICATION_NOT_FOUND, TEMPLATE_NOT_FOUND, PROVIDER_CONFIG_NOT_FOUND">Unknown id (or another tenant's)</error>
+    <error http="404" types="FROM_NOT_FOUND">from is not a From name of an active provider and not a valid address</error>
+    <error http="405" types="METHOD_NOT_ALLOWED">Wrong HTTP verb (see the Allow header)</error>
+    <error http="409" types="TENANT_SLUG_TAKEN, TEMPLATE_NAME_TAKEN, PROVIDER_NAME_TAKEN">Already exists</error>
+    <error http="409" types="NOTIFICATION_NOT_RETRYABLE, NOTIFICATION_NOT_CANCELLABLE, TEMPLATE_ARCHIVED">Wrong state for the action</error>
+    <error http="429" types="TOO_MANY_REQUESTS">Tenant rate limit; wait Retry-After seconds</error>
+    <error http="503" types="SERVICE_UNAVAILABLE">Dependency down; retry with backoff</error>
+    <note>gRPC uses the matching status codes, with the same type in the error-type trailer. Delivery failures are not request errors: the send answers 202 and the notification later shows NOTIFICATION_STATUS_FAILED with its attempts.</note>
+  </errors>
+
+  <grpcExample><![CDATA[
+grpcurl -plaintext -H "x-api-key: $API_KEY" -d '{
+  "notification": { "channel": "CHANNEL_SMS", "recipient": "+919876543210", "template": "otp", "data": { "code": "482913" } }
+}' localhost:50051 communication_hub.v1.NotificationService/SendNotification
+]]></grpcExample>
+</apiDocumentation>

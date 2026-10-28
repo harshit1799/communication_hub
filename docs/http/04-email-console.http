@@ -1,0 +1,148 @@
+# Flow: EMAIL · Console (demo, nothing is sent: logged in the server output)
+#
+# A complete flow on its own tenant: create the tenant, add the provider, (template),
+# send, check which provider and From delivered it.
+#
+# Open in VS Code with the "REST Client" extension (humao.rest-client): click "Send Request"
+# above each request, top to bottom. Ids and the API key are taken from earlier responses
+# automatically. Replace <...> values in bodies with your own (passwords, tokens).
+# {{name}}-style placeholders inside template bodies are Handlebars for the hub: REST Client
+# sends them as they are (it may underline them as unknown variables; that is fine).
+# No REST Client? Copy the method, URL, headers and JSON body into Swagger/Postman.
+
+@baseUrl = http://localhost:3000/api
+@opsUrl = http://localhost:9464
+# ADMIN_API_KEY from your .env
+@ADMIN_KEY = paste-your-ADMIN_API_KEY-here
+# FCM registration token from your app (push / in-app only)
+@FCM_TOKEN = paste-a-device-token-here
+
+### 1 · Check the service is ready
+# Expect {"ready":true}. If 503, start Postgres/Redis.
+# @name r1_check_the_service_is_ready
+GET {{opsUrl}}/health/ready
+
+### 2 · Create a tenant for this flow
+# Admin creates a tenant just for this flow (so only this provider is configured); starter templates
+# otp + welcome are added; the API key is returned once. Already ran this flow? Change the slug (409
+# TENANT_SLUG_TAKEN).
+# @name r2_create_a_tenant_for_this_flow
+POST {{baseUrl}}/v1/admin/tenants
+Content-Type: application/json
+x-admin-key: {{ADMIN_KEY}}
+
+{
+  "name": "Acme Inc.",
+  "slug": "acme-console-demo",
+  "settings": { "appName": "Acme" }
+}
+
+### 3 · Add the email provider
+# Validated → saved (credentials encrypted) → Redis cache refreshed. Safe to demo: the message is
+# printed in the server log.
+# @name r3_add_the_email_provider
+POST {{baseUrl}}/v1/providers
+Content-Type: application/json
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+{
+  "channel": "CHANNEL_EMAIL",
+  "provider": "console",
+  "name": "console-email",
+  "priority": 4,
+  "settings": { "from": "Acme <no-reply@acme.com>" },
+  "fromAddresses": { "console-demo": "Acme Orders <orders@acme.com>" }
+}
+
+### 4 · Check the From addresses
+# Lists every From with its provider. "console-demo" must be in the list: sending with it routes only
+# to this provider.
+# Query params: channel = CHANNEL_EMAIL
+# @name r4_check_the_from_addresses
+GET {{baseUrl}}/v1/from-addresses?channel=CHANNEL_EMAIL
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+### 5 · Create the email template
+# Saved as version 1 and active.
+# @name r5_create_the_email_template
+POST {{baseUrl}}/v1/templates
+Content-Type: application/json
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+{
+  "channel": "CHANNEL_EMAIL",
+  "name": "order-shipped",
+  "description": "Order shipped email",
+  "content": {
+    "subject": "Order {{orderId}} has shipped",
+    "html": "<p>Hi {{name}}, your order <b>{{orderId}}</b> is on its way. Track it: {{trackingUrl}}</p>",
+    "body": "Hi {{name}}, your order {{orderId}} is on its way. Track it: {{trackingUrl}}"
+  }
+}
+
+### 6 · Preview the template
+# Shows the rendered subject and html. Nothing is sent.
+# Path params: template id = <TEMPLATE_ID>  (id from Create template)
+# @name r6_preview_the_template
+POST {{baseUrl}}/v1/templates/{{r5_create_the_email_template.response.body.$.id}}/preview
+Content-Type: application/json
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+{
+  "data": { "name": "Jane", "orderId": "ORD-1001", "trackingUrl": "https://acme.com/t/ORD-1001" }
+}
+
+### 7 · Send email with the template
+# 202 + queue state. Worker renders the template and sends through this provider as its "console-demo"
+# address.
+# @name r7_send_email_with_the_template
+POST {{baseUrl}}/v1/notifications
+Content-Type: application/json
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+{
+  "channel": "CHANNEL_EMAIL",
+  "recipient": "jane@example.com",
+  "template": "order-shipped",
+  "data": {
+    "name": "Jane",
+    "orderId": "ORD-1001",
+    "trackingUrl": "https://acme.com/t/ORD-1001"
+  },
+  "from": "console-demo",
+  "idempotencyKey": "order-shipped-ORD-1001-console-demo"
+}
+
+### 8 · Check delivery
+# status NOTIFICATION_STATUS_SENT; providerName = this provider; sentFrom = the address used; attempts
+# list each provider call.
+# Path params: notification id = <NOTIFICATION_ID>  (notification.id from a send)
+# @name r8_check_delivery
+GET {{baseUrl}}/v1/notifications/{{r7_send_email_with_the_template.response.body.$.notification.id}}
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+### 9 · Send email without a template
+# Same flow; subject/body given directly ({{placeholders}} filled from data).
+# @name r9_send_email_without_a_template
+POST {{baseUrl}}/v1/notifications
+Content-Type: application/json
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
+
+{
+  "channel": "CHANNEL_EMAIL",
+  "recipient": "jane@example.com",
+  "subject": "Your receipt from {{appName}}",
+  "body": "Hi {{name}}, thanks for your payment of {{amount}}.",
+  "data": {
+    "name": "Jane",
+    "amount": "$49.00"
+  },
+  "from": "console-demo"
+}
+
+### 10 · Check delivery
+# As step 8.
+# Path params: notification id = <NOTIFICATION_ID>  (notification.id from a send)
+# @name r10_check_delivery
+GET {{baseUrl}}/v1/notifications/{{r9_send_email_without_a_template.response.body.$.notification.id}}
+x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
