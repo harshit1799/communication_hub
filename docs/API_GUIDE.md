@@ -587,9 +587,10 @@ curl -X POST $BASE/notifications/bulk -H 'Content-Type: application/json' -H "x-
 
 - Each target becomes its own notification with its own id, status and retry. Results come back
   in order (6 here, so `accepted: 6`), and duplicate targets are dropped.
-- `idempotencyKey` gets a per-recipient suffix (`invoice-ready-INV-1042:<hash>`), so repeating
-  the request replays it instead of sending again.
-- The 500 limit counts notifications after this expansion.
+- `idempotencyKey` gets a per-recipient suffix (`invoice-ready-INV-1042:<hash>`) whenever the
+  list form is used, even with one entry, so repeating the request, or adding recipients to the
+  list, never sends again to the earlier ones. A plain single `recipient` keeps the key as sent.
+- The 500 limit counts the targets as listed (duplicates included), across all items.
 - Several `recipients` and several `userIds` in the same item is a `VALIDATION_ERROR`.
 - `recipients` and `userIds` are bulk-only: on `POST /notifications` they are a
   `VALIDATION_ERROR`.

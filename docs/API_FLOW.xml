@@ -675,7 +675,7 @@ FAILED ──► QUEUED                                   (retry)
       </api>
 
       <api id="5.8" name="Send bulk: same message to many recipients" method="POST" rest="/v1/notifications/bulk" grpc="NotificationService/SendBulkNotifications" auth="tenant" status="202">
-        <description>One item, many targets. Email / SMS / push tokens: "recipients": [...] or a comma-separated "recipient". Push / in-app users: "userIds": [...]. Each target becomes its own notification (own id, status, retry), in order, duplicates dropped; accepted = number of targets. idempotencyKey gets a per-recipient suffix ("key:&lt;hash&gt;"), so repeating the request replays instead of sending twice. At most 500 notifications after expanding. Several recipients and several userIds in one item is a VALIDATION_ERROR; recipients / userIds on POST /v1/notifications (single send) is a VALIDATION_ERROR.</description>
+        <description>One item, many targets. Email / SMS / push tokens: "recipients": [...] or a comma-separated "recipient". Push / in-app users: "userIds": [...]. Each target becomes its own notification (own id, status, retry), in order, duplicates dropped; accepted = number of targets. idempotencyKey gets a per-recipient suffix ("key:&lt;hash&gt;") whenever the list form is used, even with one entry, so repeating the request or adding recipients never re-sends to earlier ones. At most 500 targets listed in total (duplicates included). Several recipients and several userIds in one item is a VALIDATION_ERROR; recipients / userIds on POST /v1/notifications (single send) is a VALIDATION_ERROR.</description>
         <requestBody><![CDATA[
 {
   "notifications": [

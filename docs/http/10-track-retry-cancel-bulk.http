@@ -121,8 +121,8 @@ x-api-key: {{r2_create_a_tenant_for_this_flow.response.body.$.apiKey.key}}
 ### 10 · Bulk: same message to many recipients
 # One item, many targets: recipients (list) or a comma-separated recipient for email/SMS/push tokens,
 # userIds for push/in-app. Each target becomes its own notification (6 here, accepted = 6), in order.
-# The idempotencyKey gets a per-recipient suffix, so repeating the request replays instead of sending
-# twice. Max 500 notifications after expanding.
+# The idempotencyKey gets a per-recipient suffix, so repeating the request (or adding recipients)
+# replays instead of sending twice. Max 500 targets listed in total.
 # @name r10_bulk_same_message_to_many_recipients
 POST {{baseUrl}}/v1/notifications/bulk
 Content-Type: application/json

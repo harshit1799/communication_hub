@@ -177,6 +177,25 @@ describe('Communication Hub over gRPC (e2e)', () => {
     );
   });
 
+  it('rejects a bulk request listing more than 500 targets before expanding it', async () => {
+    const recipients = Array.from({ length: 501 }, (_, i) => `+1415555${String(i).padStart(4, '0')}`);
+    await hub.expectError(
+      hub.call('NotificationService', 'SendBulkNotifications', { notifications: [{ channel: 'CHANNEL_SMS', recipients, body: 'hi' }] }, hub.tenant(key)),
+      status.INVALID_ARGUMENT,
+      'VALIDATION_ERROR',
+    );
+  });
+
+  it('does not re-send to a recipient when a retry adds recipients under the same key', async () => {
+    const idempotencyKey = `k-${randomUUID()}`;
+    const bulk = (recipients: string[]) =>
+      hub.call('NotificationService', 'SendBulkNotifications', { notifications: [{ channel: 'CHANNEL_SMS', recipients, body: 'hi', idempotencyKey }] }, hub.tenant(key));
+    const first = await bulk(['+14155550120']);
+    const second = await bulk(['+14155550120', '+14155550121']);
+    expect(second).toMatchObject({ accepted: 2, replayed: 1 });
+    expect(second.notifications[0].id).toBe(first.notifications[0].id);
+  });
+
   it('pushes to every registered device of a user', async () => {
     await hub.call('DeviceService', 'RegisterDevice', { userId: 'u-1', token: `tok-${randomUUID()}`, platform: 'DEVICE_PLATFORM_ANDROID' }, hub.tenant(key));
     const res = await send({ channel: 'CHANNEL_PUSH', userId: 'u-1', subject: 'Hi', template: 'welcome', data: struct({ name: 'Jane' }) });

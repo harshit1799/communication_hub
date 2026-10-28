@@ -197,7 +197,7 @@ x-api-key: <API_KEY>","{
       ""body"": ""Sale starts now!""
     }
   ]
-}","One item, many targets. Email / SMS / push tokens: ""recipients"": [...] or a comma-separated ""recipient"". Push / in-app users: ""userIds"": [...]. Each target becomes its own notification (own id, status, retry), in order, duplicates dropped; accepted = number of targets. idempotencyKey gets a per-recipient suffix (""key:<hash>""), so repeating the request replays instead of sending twice. At most 500 notifications after expanding. Several recipients and several userIds in one item is a VALIDATION_ERROR; recipients / userIds on POST /v1/notifications (single send) is a VALIDATION_ERROR.",,202
+}","One item, many targets. Email / SMS / push tokens: ""recipients"": [...] or a comma-separated ""recipient"". Push / in-app users: ""userIds"": [...]. Each target becomes its own notification (own id, status, retry), in order, duplicates dropped; accepted = number of targets. idempotencyKey gets a per-recipient suffix (""key:<hash>"") whenever the list form is used, even with one entry, so repeating the request or adding recipients never re-sends to earlier ones. At most 500 targets listed in total (duplicates included). Several recipients and several userIds in one item is a VALIDATION_ERROR; recipients / userIds on POST /v1/notifications (single send) is a VALIDATION_ERROR.",,202
 "API Flow: STEP 6: Track, retry and cancel  ·  Tenant backend",6.1,Get notification,GET,http://localhost:3000/api/v1/notifications/<NOTIFICATION_ID>,notification id = <NOTIFICATION_ID>  (notification.id from a send),-,x-api-key: <API_KEY>,(no body),"Notification + every provider attempt (which provider, which From, error, duration) + live BullMQ job state.",,200
 "API Flow: STEP 6: Track, retry and cancel  ·  Tenant backend",6.2,List notifications,GET,http://localhost:3000/api/v1/notifications?status=NOTIFICATION_STATUS_FAILED&channel=CHANNEL_EMAIL&page.limit=20,-,"status = NOTIFICATION_STATUS_FAILED
 channel = CHANNEL_EMAIL
@@ -786,4 +786,4 @@ x-api-key: <API_KEY>","{
       ""body"": ""Sale starts now!""
     }
   ]
-}","One item, many targets: recipients (list) or a comma-separated recipient for email/SMS/push tokens, userIds for push/in-app. Each target becomes its own notification (6 here, accepted = 6), in order. The idempotencyKey gets a per-recipient suffix, so repeating the request replays instead of sending twice. Max 500 notifications after expanding.",,
+}","One item, many targets: recipients (list) or a comma-separated recipient for email/SMS/push tokens, userIds for push/in-app. Each target becomes its own notification (6 here, accepted = 6), in order. The idempotencyKey gets a per-recipient suffix, so repeating the request (or adding recipients) replays instead of sending twice. Max 500 targets listed in total.",,

@@ -2,7 +2,7 @@
  * Bulk fan-out of recipients / userIds into one notification per target.
  */
 
-import { expandBulkItem } from './bulk-targets.js';
+import { countTargets, expandBulkItem } from './bulk-targets.js';
 
 describe('expandBulkItem', () => {
   it('leaves a single-target item unchanged', () => {
@@ -41,6 +41,27 @@ describe('expandBulkItem', () => {
     expect(a).not.toBe(b);
     // Order of the list doesn't change a target's key.
     expect(keys(['+14155550101', '+14155550100'])).toEqual([b, a]);
+  });
+
+  it('keeps the key of a target when the list grows (list form always derives keys)', () => {
+    const keyOf = (item: object) => (expandBulkItem({ channel: 'sms', body: 'b', idempotencyKey: 'K', ...item }) as { idempotencyKey: string }[])[0].idempotencyKey;
+    const one = keyOf({ recipients: ['+14155550100'] });
+    expect(one).toMatch(/^K:[0-9a-f]{16}$/);
+    expect(keyOf({ recipients: ['+14155550100', '+14155550101'] })).toBe(one);
+    expect(keyOf({ recipient: '+14155550100, +14155550101' })).toBe(one);
+    // A plain single recipient keeps the key as sent (single-send compatible).
+    expect(keyOf({ recipient: '+14155550100' })).toBe('K');
+  });
+
+  it('reports a list that is empty after trimming as a missing recipient', () => {
+    expect(expandBulkItem({ channel: 'sms', recipient: ' , ', body: 'b' })).toEqual([{ channel: 'sms', recipient: undefined, userId: undefined, body: 'b' }]);
+  });
+
+  it('counts an upper bound of targets without expanding', () => {
+    expect(countTargets({ channel: 'sms' })).toBe(1);
+    expect(countTargets({ channel: 'sms', recipient: '+1' })).toBe(1);
+    expect(countTargets({ channel: 'email', recipient: 'a@x.com, b@x.com', recipients: ['c@x.com'] })).toBe(3);
+    expect(countTargets({ channel: 'push', userId: 'u-0', userIds: ['u-1', 'u-2'] })).toBe(3);
   });
 
   it('rejects several recipients and several userIds together', () => {

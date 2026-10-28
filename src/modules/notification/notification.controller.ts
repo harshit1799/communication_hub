@@ -27,7 +27,7 @@ import { AppException } from '../../exceptions/index.js';
 import { ERROR } from '../../response/response.js';
 import { Notification, NotificationAttempt } from '../../models/index.js';
 import { RequestContextStore } from '../../utils/request-context.js';
-import { expandBulkItem } from './bulk-targets.js';
+import { countTargets, expandBulkItem } from './bulk-targets.js';
 import type { QueueSnapshot } from './notification.queue.js';
 import { NotificationService } from './notification.service.js';
 
@@ -150,15 +150,20 @@ export class NotificationController {
 
   @GrpcMethod(SERVICE, 'SendBulkNotifications')
   async sendBulk(@Payload() req: { notifications?: ProtoNotificationInput[] }, @CurrentTenant() tenant: TenantContext) {
+    // Size check before expanding: an oversized request is rejected without
+    // allocating per target (a 5 MB body can list ~330k numbers).
+    const inputs = req.notifications ?? [];
+    let total = 0;
+    for (const input of inputs) {
+      total += countTargets(input);
+      if (total > LIMITS.BULK_MAX) throw invalid(`a bulk request can list at most ${LIMITS.BULK_MAX} targets in total`);
+    }
     // Each item with several targets becomes one notification per target.
-    const notifications = (req.notifications ?? []).flatMap((input, i) => {
+    const notifications = inputs.flatMap((input, i) => {
       const items = expandBulkItem(decodeInput(input));
       if (typeof items === 'string') throw invalid(`notifications.${i}: ${items}`);
       return items;
     });
-    if (notifications.length > LIMITS.BULK_MAX) {
-      throw invalid(`a bulk request can create at most ${LIMITS.BULK_MAX} notifications (this one has ${notifications.length})`);
-    }
     const dto = validateInput(SendBulkNotificationDto, { notifications });
     const results = await this.notifications.sendBulk(tenant.tenantId, dto.notifications, this.requestId());
     return {
