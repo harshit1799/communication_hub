@@ -49,7 +49,6 @@ lerna-debug.log*
 # temp directory
 .temp
 .tmp
-/docs/CODE_REVIEW_BULK_RECIPIENTS.md
 
 # Runtime data
 pids
