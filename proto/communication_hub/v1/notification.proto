@@ -112,13 +112,36 @@ message NotificationInput {
   //                       preferring providers that list it (must be verified with the vendor)
   //   unset               each provider's default settings.from
   optional string from = 15;
-  // SendBulkNotifications only: the same content to several targets. Each
-  // entry becomes its own notification (duplicates dropped), with
-  // idempotency_key extended per target. recipient may also be a
-  // comma-separated list there.
-  //   recipients  email addresses / E.164 numbers / push tokens
-  //   user_ids    push (every device of each user) or in-app inboxes
+  // 16 and 17 are recipients / user_ids on BulkNotificationInput.
+  reserved 16, 17;
+  reserved "recipients", "user_ids";
+}
+
+// One item of SendBulkNotifications: NotificationInput (same field numbers)
+// plus target lists. The same content goes to several targets; each becomes
+// its own notification (duplicates dropped), with idempotency_key extended
+// per target (":<16 hex>", so the key may be at most 238 characters then).
+// For email and SMS, recipient may also be a comma-separated list.
+message BulkNotificationInput {
+  Channel channel = 1;
+  optional string recipient = 2;
+  optional string user_id = 3;
+  optional string subject = 4;
+  optional string body = 5;
+  optional string template = 6;
+  optional int32 template_version = 7;
+  google.protobuf.Struct data = 8;
+  map<string, string> metadata = 9;
+  Priority priority = 10;
+  google.protobuf.Timestamp scheduled_at = 11;
+  optional string idempotency_key = 12;
+  reserved 13;
+  reserved "sender_id";
+  optional bool also_push = 14;
+  optional string from = 15;
+  // Email addresses / E.164 numbers / push tokens.
   repeated string recipients = 16;
+  // Push (every device of each user) or in-app inboxes.
   repeated string user_ids = 17;
 }
 
@@ -159,7 +182,8 @@ message QueueInfo {
 }
 
 message SendBulkNotificationsRequest {
-  repeated NotificationInput notifications = 1;
+  // Same field numbers as NotificationInput, so existing clients are wire compatible.
+  repeated BulkNotificationInput notifications = 1;
 }
 
 message SendBulkNotificationsResponse {

@@ -40,6 +40,12 @@ export class MetricsService {
     labelNames: ['channel', 'priority'] as const,
     registers: [this.registry],
   });
+  readonly bulkTargets = new Histogram({
+    name: 'chub_bulk_targets',
+    help: 'Notifications per SendBulkNotifications request, after list items are fanned out',
+    buckets: [1, 5, 10, 25, 50, 100, 250, 500],
+    registers: [this.registry],
+  });
   readonly replayed = new Counter({
     name: 'chub_notifications_replayed_total',
     help: 'Requests answered with an earlier notification (idempotency key reuse)',

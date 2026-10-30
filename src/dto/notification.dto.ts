@@ -9,11 +9,7 @@
  *   in-app: { channel: in_app, userId, subject?, body | template, alsoPush? }
  */
 
-import { Type } from 'class-transformer';
 import {
-  ArrayMaxSize,
-  ArrayMinSize,
-  IsArray,
   IsBoolean,
   IsDate,
   IsEnum,
@@ -27,7 +23,6 @@ import {
   MaxLength,
   Min,
   ValidateIf,
-  ValidateNested,
 } from 'class-validator';
 import { CursorPaginationDto } from '../common/dtos/common.dtos.js';
 import {
@@ -122,16 +117,6 @@ export class SendNotificationDto {
   @IsOptional()
   @IsBoolean()
   alsoPush?: boolean;
-}
-
-/** SendBulkNotifications. */
-export class SendBulkNotificationDto {
-  @IsArray()
-  @ArrayMinSize(1)
-  @ArrayMaxSize(LIMITS.BULK_MAX)
-  @ValidateNested({ each: true })
-  @Type(() => SendNotificationDto)
-  notifications: SendNotificationDto[];
 }
 
 /** ListNotifications: pagination plus optional filters. */

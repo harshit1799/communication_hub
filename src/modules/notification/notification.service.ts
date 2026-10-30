@@ -20,6 +20,7 @@ import { Cursor } from '../../common/dtos/common.dtos.js';
 import { LIMITS, NotificationChannel, NotificationPriority, NotificationStatus } from '../../constant/index.js';
 import { ListNotificationsDto, SendNotificationDto } from '../../dto/index.js';
 import { AppException } from '../../exceptions/index.js';
+import { validateInput } from '../../grpc/validate.js';
 import { Notification, NotificationAttempt } from '../../models/index.js';
 import { ERROR } from '../../response/response.js';
 import { errorMessage } from '../../utils/appUtils.js';
@@ -29,12 +30,16 @@ import { MetricsService } from '../../utils/metrics/metrics.service.js';
 import { selectFrom } from '../provider/from-addresses.js';
 import { ProviderResolver } from '../provider/provider.resolver.js';
 import { TemplateService } from '../template/template.service.js';
+import { BulkItem, countTargets, expandBulkItem } from './bulk-targets.js';
 import { NotificationQueue, QueueSnapshot } from './notification.queue.js';
 import { RetryPolicyService } from './retry-policy.service.js';
 import { NewNotification, NotificationRepository } from './notification.repository.js';
 
 /** One day in milliseconds (scheduling limit). */
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** VALIDATION_ERROR with one message. */
+const invalid = (message: string) => new AppException(ERROR.VALIDATION_ERROR, { errors: [message] }, { detail: message });
 
 /** Result of one accepted notification. */
 export interface SendResult {
@@ -74,8 +79,31 @@ export class NotificationService {
     return result;
   }
 
-  /** Accepts many notifications in one insert and one enqueue per channel. */
-  async sendBulk(tenantId: string, dtos: SendNotificationDto[], requestId?: string): Promise<SendResult[]> {
+  /**
+   * Accepts many notifications in one insert and one enqueue per channel.
+   * Items are decoded but not yet validated: an item may list several
+   * targets (bulk-targets.ts), each of which becomes its own notification.
+   * Errors name the client's item: "notifications.<i>" for an item, and
+   * "notifications.<i>[<j>]" for its j-th distinct target.
+   */
+  async sendBulk(tenantId: string, items: BulkItem[], requestId?: string): Promise<SendResult[]> {
+    if (items.length === 0) throw invalid('notifications must contain at least 1 elements');
+    // Size check before expanding: an oversized request is rejected without
+    // allocating per target (a 5 MB body can list ~330k numbers).
+    let total = 0;
+    for (const item of items) {
+      total += countTargets(item);
+      if (total > LIMITS.BULK_MAX) throw invalid(`a bulk request can list at most ${LIMITS.BULK_MAX} targets in total`);
+    }
+    // Per-target key suffix: the keyed per-tenant blind index, never a plain hash.
+    const hashTarget = (channel: string, target: string) => this.recipientHash(tenantId, channel, target);
+    const dtos = items.flatMap((item, i) => {
+      const expanded = expandBulkItem(item, hashTarget);
+      if (!expanded.ok) throw invalid(`notifications.${i}: ${expanded.error}`);
+      const several = expanded.items.length > 1;
+      return expanded.items.map((target, j) => validateInput(SendNotificationDto, target, several ? `notifications.${i}[${j}]` : `notifications.${i}`));
+    });
+    this.metrics.bulkTargets.observe(dtos.length);
     // Bulk sends (campaigns) default to low priority, so single sends such as
     // login OTPs are delivered first even while a large campaign is queued.
     return this.sendMany(tenantId, dtos, NotificationPriority.Low, requestId);
@@ -83,9 +111,7 @@ export class NotificationService {
 
   /** One page of the tenant's notifications. Throws INVALID_ARGUMENT on a bad cursor. */
   list(tenantId: string, query: ListNotificationsDto) {
-    if (query.cursor && !Cursor.decode(query.cursor)) {
-      throw new AppException(ERROR.VALIDATION_ERROR, { errors: ['cursor is invalid'] }, { detail: 'cursor is invalid' });
-    }
+    if (query.cursor && !Cursor.decode(query.cursor)) throw invalid('cursor is invalid');
     return this.notifications.list(tenantId, {
       status: query.status,
       channel: query.channel,
@@ -100,7 +126,6 @@ export class NotificationService {
     });
   }
 
-  /** A notification with its attempt log. Throws NOTIFICATION_NOT_FOUND. */
   /** A notification with its attempt log and live queue state. Throws NOTIFICATION_NOT_FOUND. */
   async findOne(tenantId: string, id: string): Promise<{ notification: Notification; queue: QueueSnapshot | null }> {
     const n = await this.notifications.findWithAttempts(tenantId, id);
@@ -194,15 +219,15 @@ export class NotificationService {
     });
 
     // Queue state for each, and the attempt history for replays (a retrying
-    // client sees what already happened). Read after enqueueing, so a fast
-    // worker may already show the job as active or completed.
-    return Promise.all(
-      results.map(async (r) => ({
-        ...r,
-        queue: await this.queueState(r.notification),
-        attempts: r.replayed ? ((await this.notifications.findWithAttempts(tenantId, r.notification.id))?.attemptLog ?? []) : [],
-      })),
-    );
+    // client sees what already happened), each read in one batch. Read after
+    // enqueueing, so a fast worker may already show the job as active or completed.
+    const replayedIds = results.filter((r) => r.replayed).map((r) => r.notification.id);
+    const [queues, history] = await Promise.all([
+      Promise.all(results.map((r) => this.queueState(r.notification))),
+      replayedIds.length ? this.notifications.findManyWithAttempts(tenantId, replayedIds) : [],
+    ]);
+    const attemptsById = new Map(history.map((n) => [n.id, n.attemptLog ?? []]));
+    return results.map((r, i) => ({ ...r, queue: queues[i], attempts: attemptsById.get(r.notification.id) ?? [] }));
   }
 
   /** Live queue state, or null when Redis can't be read (never fails the request). */
@@ -218,17 +243,21 @@ export class NotificationService {
   /**
    * Checks DTO decorators can't express: the template exists (and pins its
    * version), the From name exists on a provider, inline placeholders
-   * compile, scheduledAt is within the limit. Template lookups are shared
-   * across a bulk request.
+   * compile, scheduledAt is within the limit. Template lookups and inline
+   * compiles are shared across a bulk request (a fanned-out item repeats the
+   * same subject / body for every target).
    */
   private async validate(tenantId: string, dtos: SendNotificationDto[]): Promise<({ templateId: string; version: number } | null)[]> {
     const templateLookups = new Map<string, Promise<{ templateId: string; version: number }>>();
     const fromLookups = new Map<string, Promise<string | null>>();
     const resolved: ({ templateId: string; version: number } | null)[] = [];
+    // Syntax errors don't depend on data (strict: false), so each distinct text is compiled once.
+    const compiled = new Set<string>();
 
     for (const dto of dtos) {
       for (const text of [dto.subject, dto.body]) {
-        if (!text) continue;
+        if (!text || compiled.has(text)) continue;
+        compiled.add(text);
         try {
           this.templates.renderText(text, dto.data ?? {});
         } catch (err) {
@@ -250,13 +279,9 @@ export class NotificationService {
         const error = await fromLookups.get(key);
         if (error) throw new AppException(ERROR.FROM_NOT_FOUND, { errors: [error] }, { from: dto.from });
       }
-      if (dto.alsoPush && dto.channel !== NotificationChannel.InApp) {
-        const message = 'alsoPush is only supported for CHANNEL_IN_APP';
-        throw new AppException(ERROR.VALIDATION_ERROR, { errors: [message] }, { detail: message });
-      }
+      if (dto.alsoPush && dto.channel !== NotificationChannel.InApp) throw invalid('alsoPush is only supported for CHANNEL_IN_APP');
       if (dto.scheduledAt && dto.scheduledAt.getTime() > Date.now() + LIMITS.SCHEDULE_MAX_DAYS * DAY_MS) {
-        const message = `scheduledAt must be within ${LIMITS.SCHEDULE_MAX_DAYS} days`;
-        throw new AppException(ERROR.VALIDATION_ERROR, { errors: [message] }, { detail: message });
+        throw invalid(`scheduledAt must be within ${LIMITS.SCHEDULE_MAX_DAYS} days`);
       }
       if (dto.template) {
         const key = `${dto.channel}:${dto.template}:${dto.templateVersion ?? ''}`;

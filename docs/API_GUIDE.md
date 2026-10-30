@@ -571,8 +571,9 @@ state of each, same order). Bulk defaults to
 `PRIORITY_LOW`, so single sends (OTPs) are never delayed by a campaign.
 
 **Same message to many recipients.** One item can name several targets: `recipients` (a list)
-or a comma-separated `recipient` for email addresses, E.164 numbers and push tokens, and
-`userIds` for push and in-app users:
+for email addresses, E.164 numbers and push tokens, and `userIds` for push and in-app users.
+`recipients` is the recommended form; for email and SMS only, `recipient` may also be a
+comma-separated list (a push token is never split):
 
 ```bash
 curl -X POST $BASE/notifications/bulk -H 'Content-Type: application/json' -H "x-api-key: $API_KEY" \
@@ -587,13 +588,21 @@ curl -X POST $BASE/notifications/bulk -H 'Content-Type: application/json' -H "x-
 
 - Each target becomes its own notification with its own id, status and retry. Results come back
   in order (6 here, so `accepted: 6`), and duplicate targets are dropped.
-- `idempotencyKey` gets a per-recipient suffix (`invoice-ready-INV-1042:<hash>`) whenever the
-  list form is used, even with one entry, so repeating the request, or adding recipients to the
-  list, never sends again to the earlier ones. A plain single `recipient` keeps the key as sent.
+- **Idempotency keys.** In the list form (`recipients`, `userIds` or a comma-separated
+  `recipient`, even with one entry) `idempotencyKey` gets a per-recipient suffix
+  (`invoice-ready-INV-1042:<16 hex>`, a keyed hash of the recipient), so repeating the request,
+  or adding recipients to the list, never sends again to the earlier ones. A plain single
+  `recipient` keeps the key as sent. The two forms therefore give different keys: switching one
+  recipient from `"recipient": "x"` to `"recipients": ["x"]` under the same key sends again.
+  Pick one form per campaign.
+- In the list form `idempotencyKey` may be at most 238 characters (255 minus the suffix).
+- Avoid your own keys shaped like `<key>:<16 hex>`; they share the namespace of derived keys.
 - The 500 limit counts the targets as listed (duplicates included), across all items.
 - Several `recipients` and several `userIds` in the same item is a `VALIDATION_ERROR`.
-- `recipients` and `userIds` are bulk-only: on `POST /notifications` they are a
-  `VALIDATION_ERROR`.
+- Errors name your item: `notifications.1.recipient …` for item 1, and
+  `notifications.1[2].recipient …` for the third distinct target that item lists.
+- `recipients` and `userIds` are bulk-only (`BulkNotificationInput`): on `POST /notifications`
+  they are an unknown field (`400`).
 
 ### Request fields
 
@@ -602,7 +611,7 @@ curl -X POST $BASE/notifications/bulk -H 'Content-Type: application/json' -H "x-
 | `channel` | all | `CHANNEL_EMAIL` · `CHANNEL_SMS` · `CHANNEL_PUSH` · `CHANNEL_IN_APP` |
 | `recipient` | email, SMS, push | email address · E.164 number · device token |
 | `userId` | push, in-app | your user id: all devices (push) / the user's inbox (in-app, required) |
-| `recipients` | email, SMS, push | bulk only: several recipients, one notification each (`recipient` may also be comma-separated in bulk) |
+| `recipients` | email, SMS, push | bulk only: several recipients, one notification each (email / SMS `recipient` may also be comma-separated in bulk) |
 | `userIds` | push, in-app | bulk only: several users, one notification each |
 | `template` | all | template name; its active version is pinned on the notification |
 | `templateVersion` | all | send a specific version instead of the active one |

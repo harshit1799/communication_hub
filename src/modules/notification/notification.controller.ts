@@ -8,9 +8,8 @@
 
 import { Controller } from '@nestjs/common';
 import { GrpcMethod, Payload } from '@nestjs/microservices';
-import { LIMITS } from '../../constant/index.js';
 import { CurrentTenant, type TenantContext } from '../../decorator/index.js';
-import { ListNotificationsDto, NotificationIdDto, SendBulkNotificationDto, SendNotificationDto } from '../../dto/index.js';
+import { ListNotificationsDto, NotificationIdDto, SendNotificationDto } from '../../dto/index.js';
 import {
   ChannelCodec,
   compact,
@@ -23,11 +22,8 @@ import {
   Timestamp,
 } from '../../grpc/codecs.js';
 import { validateInput } from '../../grpc/validate.js';
-import { AppException } from '../../exceptions/index.js';
-import { ERROR } from '../../response/response.js';
 import { Notification, NotificationAttempt } from '../../models/index.js';
 import { RequestContextStore } from '../../utils/request-context.js';
-import { countTargets, expandBulkItem } from './bulk-targets.js';
 import type { QueueSnapshot } from './notification.queue.js';
 import { NotificationService } from './notification.service.js';
 
@@ -49,16 +45,16 @@ interface ProtoNotificationInput {
   idempotencyKey?: string;
   from?: string;
   alsoPush?: boolean;
-  // SendBulkNotifications only (fanned out by expandBulkItem).
+}
+
+/** BulkNotificationInput: NotificationInput plus the target lists (fanned out by NotificationService). */
+interface ProtoBulkNotificationInput extends ProtoNotificationInput {
   recipients?: string[];
   userIds?: string[];
 }
 
-/** VALIDATION_ERROR with one message. */
-const invalid = (message: string) => new AppException(ERROR.VALIDATION_ERROR, { errors: [message] }, { detail: message });
-
 /** Proto input -> plain object for SendNotificationDto validation. */
-function decodeInput(input: ProtoNotificationInput = {}) {
+function decodeInput(input: ProtoBulkNotificationInput = {}) {
   return compact({
     ...input,
     channel: ChannelCodec.decode(input.channel),
@@ -135,9 +131,6 @@ export class NotificationController {
 
   @GrpcMethod(SERVICE, 'SendNotification')
   async send(@Payload() req: { notification?: ProtoNotificationInput }, @CurrentTenant() tenant: TenantContext) {
-    if (req.notification?.recipients?.length || req.notification?.userIds?.length) {
-      throw invalid('recipients and userIds are only supported by SendBulkNotifications (POST /v1/notifications/bulk)');
-    }
     const dto = validateInput(SendNotificationDto, decodeInput(req.notification));
     const { notification, replayed, attempts, queue } = await this.notifications.send(tenant.tenantId, dto, this.requestId());
     return compact({
@@ -149,23 +142,10 @@ export class NotificationController {
   }
 
   @GrpcMethod(SERVICE, 'SendBulkNotifications')
-  async sendBulk(@Payload() req: { notifications?: ProtoNotificationInput[] }, @CurrentTenant() tenant: TenantContext) {
-    // Size check before expanding: an oversized request is rejected without
-    // allocating per target (a 5 MB body can list ~330k numbers).
-    const inputs = req.notifications ?? [];
-    let total = 0;
-    for (const input of inputs) {
-      total += countTargets(input);
-      if (total > LIMITS.BULK_MAX) throw invalid(`a bulk request can list at most ${LIMITS.BULK_MAX} targets in total`);
-    }
-    // Each item with several targets becomes one notification per target.
-    const notifications = inputs.flatMap((input, i) => {
-      const items = expandBulkItem(decodeInput(input));
-      if (typeof items === 'string') throw invalid(`notifications.${i}: ${items}`);
-      return items;
-    });
-    const dto = validateInput(SendBulkNotificationDto, { notifications });
-    const results = await this.notifications.sendBulk(tenant.tenantId, dto.notifications, this.requestId());
+  async sendBulk(@Payload() req: { notifications?: ProtoBulkNotificationInput[] }, @CurrentTenant() tenant: TenantContext) {
+    // Size check, fan-out and validation happen in the service.
+    const items = (req.notifications ?? []).map((input) => decodeInput(input));
+    const results = await this.notifications.sendBulk(tenant.tenantId, items, this.requestId());
     return {
       accepted: results.length,
       replayed: results.filter((r) => r.replayed).length,

@@ -19,12 +19,16 @@ function messages(errors: ValidationError[], parent = ''): string[] {
   });
 }
 
-/** Returns the validated DTO or throws AppException(VALIDATION_ERROR). */
-export function validateInput<T extends object>(cls: Type<T>, plain: object): T {
+/**
+ * Returns the validated DTO or throws AppException(VALIDATION_ERROR).
+ * `path` prefixes the messages when the input is part of a larger request
+ * ("notifications.3" -> "notifications.3.recipient ...").
+ */
+export function validateInput<T extends object>(cls: Type<T>, plain: object, path = ''): T {
   const dto = plainToInstance(cls, plain);
   const errors = validateSync(dto, { whitelist: true, forbidUnknownValues: true });
   if (errors.length > 0) {
-    const list = messages(errors);
+    const list = messages(errors, path);
     throw new AppException(ERROR.VALIDATION_ERROR, { errors: list }, { detail: list[0] });
   }
   return dto;

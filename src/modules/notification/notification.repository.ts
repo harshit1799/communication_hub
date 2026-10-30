@@ -90,6 +90,11 @@ export class NotificationRepository extends BaseRepository<Notification> {
     return this.findOne({ tenantId, id }, { relations: { attemptLog: true }, order: { attemptLog: { attempt: 'ASC' } } });
   }
 
+  /** Several notifications of the tenant with their attempt logs, in one query. */
+  findManyWithAttempts(tenantId: string, ids: string[]): Promise<Notification[]> {
+    return this.findMany({ tenantId, id: In(ids) }, { relations: { attemptLog: true }, order: { attemptLog: { attempt: 'ASC' } } });
+  }
+
   /** For workers: the notification with its tenant (branding). */
   findWithTenant(id: string): Promise<Notification | null> {
     return this.findOne({ id }, { relations: { tenant: true } });

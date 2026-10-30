@@ -186,6 +186,21 @@ describe('Communication Hub over gRPC (e2e)', () => {
     );
   });
 
+  it('rejects bulk items the fan-out cannot split, naming the client item', async () => {
+    const bulk = (notifications: object[]) => hub.call('NotificationService', 'SendBulkNotifications', { notifications }, hub.tenant(key));
+    const errorOf = async (notifications: object[]) => (await hub.expectError(bulk(notifications), status.INVALID_ARGUMENT, 'VALIDATION_ERROR')).details;
+    const ok = { channel: 'CHANNEL_SMS', recipients: ['+14155550130', '+14155550131', '+14155550132'], body: 'hi' };
+
+    // Several recipients and several userIds in one item.
+    expect(await errorOf([ok, { channel: 'CHANNEL_PUSH', recipients: ['t1', 't2'], userIds: ['u1', 'u2'], body: 'hi' }])).toContain('notifications.1');
+    // A key with no room for the per-target suffix (238 is the most a list-form item may carry).
+    const keyed = (length: number) => ({ channel: 'CHANNEL_SMS', recipients: ['+14155550133'], body: 'hi', idempotencyKey: `${randomUUID()}`.padEnd(length, 'k') });
+    expect(await errorOf([keyed(239)])).toContain('at most 238 characters');
+    expect((await bulk([keyed(238)])).notifications[0].idempotencyKey).toHaveLength(255);
+    // A bad target is reported against the client's item, not the expanded position.
+    expect(await errorOf([ok, { channel: 'CHANNEL_SMS', recipients: ['+14155550134', 'not-a-number'], body: 'hi' }])).toContain('notifications.1[1].recipient');
+  });
+
   it('does not re-send to a recipient when a retry adds recipients under the same key', async () => {
     const idempotencyKey = `k-${randomUUID()}`;
     const bulk = (recipients: string[]) =>

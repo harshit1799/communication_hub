@@ -121,8 +121,9 @@ export class NotificationQueue implements OnModuleInit {
   }
 
   /**
-   * The live state of the notification's job. Two Redis round trips; a
-   * missing job is reported from the notification row instead.
+   * The live state of the notification's job. The job and its state are
+   * read concurrently (one round trip); a missing job is reported from the
+   * notification row instead.
    */
   async inspect(
     n: Enqueueable & Pick<Notification, 'status' | 'attempts'>,
@@ -130,7 +131,7 @@ export class NotificationQueue implements OnModuleInit {
   ): Promise<QueueSnapshot> {
     const queue = this.queues[n.channel];
     const base = { queue: queue.name, jobId: n.id, priority: QUEUE_PRIORITY[n.priority] };
-    const job = await queue.getJob(n.id);
+    const [job, state] = await Promise.all([queue.getJob(n.id), queue.getJobState(n.id)]);
     if (!job) {
       return {
         ...base,
@@ -140,7 +141,6 @@ export class NotificationQueue implements OnModuleInit {
         runAt: null,
       };
     }
-    const state = await job.getState();
     const scheduled = n.scheduledAt && n.scheduledAt.getTime() > Date.now() ? n.scheduledAt : null;
     // Retry backoff: the delay counts from the failed attempt (approximated by its start).
     const backoffUntil = state === 'delayed' && !scheduled && job.delay > 0 ? new Date((job.processedOn ?? job.timestamp) + job.delay) : null;
