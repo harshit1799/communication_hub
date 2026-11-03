@@ -2,10 +2,10 @@
 
 | | |
 | --- | --- |
-| Code reviewed | Commits `2622d77` and `7d5395c` ("change in send bulk notification") plus the current working-tree changes (the round 1 fixes) |
+| Code reviewed | Commits `2622d77` and `7d5395c` ("change in send bulk notification") plus the round 1 fixes, committed as `5279622` |
 | Feature | `POST /v1/notifications/bulk` accepts several targets per item (`recipients`, `userIds`, or for email / SMS a comma-separated `recipient`); each target becomes its own notification |
-| Review dates | Round 1: 2026-10-28. Round 2 (this document): 2026-10-30, against the fixed code |
-| Verdict | Round 1: **PASS WITH COMMENTS**. Round 2: **PASS WITH COMMENTS** (one High issue that predates this change, see H1) |
+| Review dates | Round 1: 2026-10-28. Round 2: 2026-10-30, against the fixed code. Triage: 2026-11-03 |
+| Verdict | Round 1: **PASS WITH COMMENTS**. Round 2: **PASS**: 0 open issues. The 9 round 2 items were accepted as deferred follow-ups on 2026-11-03 and are scheduled for the week of 2–6 Nov ([§2](#2-open-issues-and-deferred-follow-ups)) |
 
 **Scope (round 2)**
 
@@ -26,15 +26,15 @@
 | Typecheck (`tsc --noEmit`) | Clean |
 | Unit tests | 132 passed (11 files) |
 | End-to-end tests | 65 passed (6 files) |
-| oxlint (`--type-aware`) | No warnings in the changed lines. Two `no-misused-spread` warnings at `notification.service.ts:148` and `:160` are in older code (L13). |
-| Prettier | Flags all 9 changed source and test files (L7, still open) |
+| oxlint (`--type-aware`) | No warnings in the changed lines. Two `no-misused-spread` warnings at `notification.service.ts:148` and `:160` are in older code (L13, deferred). |
+| Prettier | Flags all 9 changed source and test files (L7, deferred) |
 | `npm audit --omit=dev` | 8 advisories (3 High, 1 Moderate, 4 Low), none introduced by this change ([§4](#4-security-findings)) |
 
 ---
 
 ## 1. Executive summary
 
-**Overall verdict: PASS WITH COMMENTS.**
+**Overall verdict: PASS.** No issues are open against this PR.
 
 The round 1 fixes are in and they work:
 - The bulk logic now lives in `NotificationService.sendBulk`. The controller only decodes.
@@ -45,18 +45,14 @@ The round 1 fixes are in and they work:
 
 The tests cover the new behaviour, and everything passes.
 
-Round 2 found one **High** issue, which predates this change: when Redis is unreachable, a send request **hangs** instead of degrading as the code comments promise (H1). The bulk path makes it more serious: up to 500 rows are committed, the client times out, and a client that retries without an idempotency key sends everything again. It should be fixed next, as its own change.
+Round 2 raised 9 items (H1, M6, M7, L7–L13). On 2026-11-03 all 9 were accepted as **deferred follow-ups**: they don't block this PR, and each has a day in the 2–6 Nov plan. They are not fixed yet. The most important is H1: when Redis is unreachable, a send request hangs instead of degrading, and H1 predates this change.
 
-The new **Medium** issues:
-- M6: the switch to the keyed hash changes every derived key once, on deploy. A future `BLIND_INDEX_KEY` rotation would do the same.
-- M7: bulk validation now stops at the first invalid item instead of reporting all of them.
-
-| Severity | Round 1 (all addressed) | Round 2 (new) |
-| --- | --- | --- |
-| Critical | 0 | 0 |
-| High | 0 | 1 (predates this change) |
-| Medium | 5 | 2 |
-| Low | 7 (L7 still open) | 6 |
+| Severity | Open | Deferred (accepted, scheduled) | Fixed |
+| --- | --- | --- | --- |
+| Critical | 0 | 0 | 0 |
+| High | 0 | 1 (H1) | 0 |
+| Medium | 0 | 2 (M6, M7) | 5 (M1–M5) |
+| Low | 0 | 7 (L7–L13) | 6 (L1–L6) |
 
 ### Round 1 findings and their status
 
@@ -73,17 +69,39 @@ The new **Medium** issues:
 | L4 | Low | Missing tests | **Fixed.** End-to-end: both lists in one item, 238 / 239 key, client item index. Unit: push token with a comma, key limit. |
 | L5 | Low | No metric for split size | **Fixed.** Histogram `chub_bulk_targets`, buckets 1–500. |
 | L6 | Low | A derived key could collide with a client key `x:<16 hex>` | **Fixed (documented).** The keyed suffix can't be predicted; the API guide tells clients to avoid that shape. |
-| L7 | Low | Prettier drift | **Open by design.** 120 files fail across the repo (`printWidth` 80 against code written about 150 wide). Reformat in its own commit. |
+| L7 | Low | Prettier drift | **Deferred** (Fri 6 Nov). 120 files fail across the repo (`printWidth` 80 against code written about 150 wide). Reformat in its own commit. |
 
 ---
 
-## 2. Findings (round 2)
+## 2. Open issues and deferred follow-ups
 
-### Critical Issues
+### Open issues
 
-No issues found.
+| Critical | High | Medium | Low |
+| --- | --- | --- | --- |
+| 0 | 0 | 0 | 0 |
 
-### High Priority Issues
+No issues found that block this PR.
+
+### Deferred follow-ups (accepted 2026-11-03)
+
+These are known and still in the code. They are tracked, not fixed. Details follow below.
+
+| # | Sev. | Item | Planned |
+| --- | --- | --- | --- |
+| H1 | High | Send requests hang while Redis is unreachable (predates this change) | Mon 2 Nov |
+| M7 | Medium | Bulk validation stops at the first invalid item | Tue 3 Nov |
+| L8 | Low | `[<j>]` counts distinct targets, not the client's list index | Tue 3 Nov |
+| L9 | Low | Items are decoded before the size check | Wed 4 Nov |
+| L10 | Low | "at least 1 elements" wording | Wed 4 Nov |
+| L11 | Low | No unit test for `NotificationService.sendBulk` | Wed 4 Nov |
+| L12 | Low | `decodeInput` type covers single send too | Wed 4 Nov |
+| M6 | Medium | Derived keys change on deploy and on `BLIND_INDEX_KEY` rotation | Thu 5 Nov |
+| L13 | Low | Two oxlint warnings in older code | Thu 5 Nov |
+| — | — | `npm audit` advisories (outside this change) | Thu 5 Nov |
+| L7 | Low | Repo-wide Prettier reformat | Fri 6 Nov |
+
+### Deferred: High
 
 | # | Issue | Where | Impact | Risk | Fix |
 | --- | --- | --- | --- | --- | --- |
@@ -91,14 +109,14 @@ No issues found.
 
 *Found by reading the connection options; not reproduced against a stopped Redis. A quick way to confirm it: stop Redis, then `POST /v1/notifications`.*
 
-### Medium Issues
+### Deferred: Medium
 
 | # | Issue | Where | Impact | Risk | Fix |
 | --- | --- | --- | --- | --- | --- |
 | M6 | **Derived keys change when this ships, and on every `BLIND_INDEX_KEY` rotation.** The suffix used to be `sha256(target)`; now it is `HMAC(BLIND_INDEX_KEY, tenant ‖ target)`. | [notification.service.ts:99](../src/modules/notification/notification.service.ts#L99), [field-cipher.ts:112-113](../src/utils/crypto/field-cipher.ts#L112-L113) | If `2622d77` / `7d5395c` is already deployed, a client that repeats a bulk request across this deploy re-sends to every list-form target. Rotating the blind-index key later does the same, silently. Neither is documented. | Duplicate SMS or email, once per deploy or rotation | If the old version is live, deploy at a quiet time or announce a short window. Add a line to the key-rotation runbook: rotating `BLIND_INDEX_KEY` resets bulk idempotency for keys in flight (and needs the `recipient_hash` backfill anyway). |
 | M7 | **Bulk validation stops at the first invalid item.** Before the fix, one `validateInput(SendBulkNotificationDto, …)` call reported every invalid item. Now `flatMap` throws on the first failing item or target. | [notification.service.ts:100-105](../src/modules/notification/notification.service.ts#L100-L105) | A 500-target request with 30 bad numbers takes 30 round trips to fix. This is a change to the bulk error contract that the API guide doesn't mention. | Client friction; support tickets | Collect the messages of all items and throw once, capped at about 50 messages to bound the response size. See [§7](#7-suggested-improved-code). |
 
-### Low Priority Issues
+### Deferred: Low
 
 | # | Issue | Where | Fix |
 | --- | --- | --- | --- |
@@ -112,6 +130,8 @@ No issues found.
 ---
 
 ## 3. Category review
+
+Item ids in this table (H1, M6, M7, L7–L13) are deferred follow-ups from [§2](#2-open-issues-and-deferred-follow-ups), not open issues.
 
 | # | Category | Result |
 | --- | --- | --- |
@@ -274,22 +294,22 @@ const fromList = recipients.map((value, k) => ({ value, source: `recipients[${k}
 | Code quality | ★★★★☆ | ★★★★☆ |
 | Testing | ★★★★☆ | ★★★★☆ |
 | Documentation | ★★★★☆ | ★★★★★ |
-| Production readiness | ★★★★☆ | ★★★☆☆ (H1 found in this round; it predates the change) |
+| Production readiness | ★★★★☆ | ★★★☆☆ (H1 deferred to Mon 2 Nov; it predates the change) |
 
 ## 10. Final recommendation
 
-**Approve: YES, with comments.**
+**Approve: YES.**
 
 Why:
 - Every round 1 finding is addressed and covered by tests.
-- No Critical issues, and no High issue introduced by this change.
+- 0 open issues: the 9 round 2 items were accepted as deferred follow-ups on 2026-11-03.
 - The typecheck and all 132 unit and 65 end-to-end tests pass.
 
-The one High issue (H1) is older than this change, so holding the PR wouldn't remove it. It does need a ticket and a fix before the next large campaign, because bulk raises its cost.
+The deferred items are still in the code. H1 is older than this change, so holding the PR wouldn't remove it. It still needs fixing before the next large campaign, because bulk raises its cost.
 
-Follow-ups, in order:
-1. **H1**: timeouts on enqueue and queue reads in the request path.
-2. **M6**: check whether the old key derivation is live, then plan the deploy and add the rotation note to the runbook.
-3. **M7**, with **L8**: collect all validation errors, and report the client's own list index.
-4. **L11**: a service-level spec for `sendBulk`.
-5. The other Low items, and the Prettier reformat (L7) in its own commit.
+Deferred follow-ups, as scheduled:
+1. **Mon 2 Nov, H1**: timeouts on enqueue and queue reads in the request path.
+2. **Tue 3 Nov, M7 and L8**: collect all validation errors, and report the client's own list index.
+3. **Wed 4 Nov, L9–L12**: decode after the size check, message wording, a service-level spec for `sendBulk`, the `decodeInput` type.
+4. **Thu 5 Nov, M6, L13 and `npm audit`**: deploy plan and rotation note, lint warnings, dependency advisories.
+5. **Fri 6 Nov, L7**: the Prettier reformat in its own commit.
